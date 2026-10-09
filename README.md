@@ -70,7 +70,8 @@ immersed-iga/
 │   │   ├── solver.rs                  # Matrix-free PCG & active-set contact solvers
 │   │   └── bin/
 │   │       ├── obstacle_course.rs     # 5-obstacle verification benchmark binary
-│   │       └── wgpu_matrixfree_benchmark.rs # WGPU compute shader matrix-free kernel
+│   │       ├── wgpu_matrixfree_benchmark.rs # WGPU compute shader matrix-free kernel
+│   │       └── cuda_matrixfree_benchmark.rs # Native CUDA driver API kernel (cudarc)
 └── figures/                           # High-resolution figures (local, git-ignored)
 ```
 
@@ -83,14 +84,14 @@ immersed-iga/
 Benchmarks executed on **NVIDIA GeForce RTX 2050 (4 GB VRAM, Ampere GA107)** with identical problem configurations and mathematical formulations.
 
 ### 1. Matrix-Free Element-Level MatVec ($y_e = w_e K_e p_e$)
-Evaluates tensor-product contractions without forming or storing global stiffness matrices:
+Evaluates tensor-product contractions without forming or storing global stiffness matrices (three-way comparison across backends):
 
-| Elements ($N_e$) | Total DOFs | MATLAB CPU | MATLAB GPU (`gpuArray`) | Rust Native CPU | Rust WGPU (VRAM Compute Shader) | Throughput (GFLOP/s) |
-| :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **500** | 12,000 | 0.052 ms | 0.084 ms | 0.064 ms | **0.048 ms** | 11.9 GFLOP/s |
-| **2,000** | 48,000 | 0.080 ms | 0.096 ms | 0.263 ms | **0.042 ms** | 55.5 GFLOP/s |
-| **8,000** | 192,000 | 0.222 ms | 0.126 ms | 1.029 ms | **0.084 ms** | 109.1 GFLOP/s |
-| **32,000** | 768,000 | 1.027 ms | 0.243 ms | 4.236 ms | **0.327 ms** | **112.7 GFLOP/s** |
+| Elements ($N_e$) | Total DOFs | MATLAB CPU | MATLAB GPU (`gpuArray`) | Rust Native CPU | Rust WGPU (Compute Shader) | Rust Native CUDA (`cudarc` PTX) | Peak GPU Throughput |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **500** | 12,000 | 0.052 ms | 0.084 ms | 0.064 ms | 0.048 ms | **0.021 ms** | **27.3 GFLOP/s** |
+| **2,000** | 48,000 | 0.080 ms | 0.096 ms | 0.263 ms | 0.042 ms | **0.026 ms** | **89.0 GFLOP/s** |
+| **8,000** | 192,000 | 0.222 ms | 0.126 ms | 1.029 ms | 0.084 ms | **0.074 ms** | **125.2 GFLOP/s** |
+| **32,000** | 768,000 | 1.027 ms | 0.243 ms | 4.236 ms | **0.327 ms** | 0.784 ms | **112.7 GFLOP/s** |
 
 > **Note on GPU Scaling**: In iterative PCG solvers, vectors remain persistent in VRAM. Rust's WGPU compute shader achieves **>112 GFLOP/s** sustain across 32,000 elements with zero host memory bandwidth bottlenecks.
 
@@ -138,8 +139,11 @@ cargo run --release --manifest-path rust/Cargo.toml --bin obstacle_course
 
 # Run WGPU Matrix-Free GPU Compute Shader Benchmark
 cargo run --release --manifest-path rust/Cargo.toml --bin wgpu_matrixfree_benchmark
+
+# Run Native NVIDIA CUDA Benchmark (cudarc Driver API)
+cargo run --release --manifest-path rust/Cargo.toml --bin cuda_matrixfree_benchmark
 ```
-Executes the self-contained Rust implementation of the 2:1 balanced octree, MPC constraint elimination, B-spline basis evaluation, and WGPU matrix-free compute shaders directly on the GPU.
+Executes the self-contained Rust implementation with your choice of CPU, cross-platform WGPU compute shaders, or direct native NVIDIA CUDA kernels.
 
 ---
 

@@ -9,6 +9,7 @@ description = "High-performance zero-dependency Immersed Catmull-Clark Isogeomet
 wgpu = "22.0"
 pollster = "0.3"
 bytemuck = { version = "1.16", features = ["derive"] }
+cudarc = { version = "0.19", default-features = false, features = ["driver", "dynamic-loading", "cuda-12080", "nvrtc"] }
 
 [[bin]]
 name = "obstacle_course"
@@ -17,6 +18,10 @@ path = "src/bin/obstacle_course.rs"
 [[bin]]
 name = "wgpu_matrixfree_benchmark"
 path = "src/bin/wgpu_matrixfree_benchmark.rs"
+
+[[bin]]
+name = "cuda_matrixfree_benchmark"
+path = "src/bin/cuda_matrixfree_benchmark.rs"
 
 [profile.release]
 opt-level = 3
