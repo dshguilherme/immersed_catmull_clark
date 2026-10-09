@@ -11,6 +11,7 @@ pollster = "0.3"
 bytemuck = { version = "1.16", features = ["derive"] }
 cudarc = { version = "0.19", default-features = false, features = ["driver", "dynamic-loading", "cuda-12080", "nvrtc"] }
 rayon = "1.10"
+eframe = "0.29"
 
 [[bin]]
 name = "obstacle_course"
@@ -31,6 +32,10 @@ path = "src/bin/topopt_3d.rs"
 [[bin]]
 name = "solve_cad"
 path = "src/bin/solve_cad.rs"
+
+[[bin]]
+name = "cad_gui"
+path = "src/bin/cad_gui.rs"
 
 [profile.release]
 opt-level = 3
