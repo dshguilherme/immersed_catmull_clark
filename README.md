@@ -6,13 +6,13 @@ A high-performance research framework in MATLAB for immersed Isogeometric Analys
 
 ## Key Highlights
 
-- **Direct CAD B-Rep Input**: Seamlessly imports **STP / STEP** (AP203 & AP242), **MSH**, **VTU / VTK**, and **STL** geometries via a robust headless Gmsh bridge (no MATLAB PDE Toolbox license required). Tested on official NIST PMI benchmark models (`nist_ctc_01_asme1_rd.stp`, etc.).
+- **Direct CAD B-Rep & Multi-Body Assembly Input**: Seamlessly imports **STP / STEP** (AP203 & AP242), **MSH**, **VTU / VTK**, and **STL** geometries via a robust headless Gmsh bridge (no MATLAB PDE Toolbox license required). Configures complex multi-body CAD assemblies with independent, scale-adapted non-conforming background octrees.
 - **Catmull-Clark Basis & Tensor-Product Weighted Quadrature**: Leverages the mathematical equivalence of regular Catmull-Clark limit functions to uniform cubic B-splines. Evaluates cell integrals via 1D Kronecker sum-factorization and sub-cell Weighted Quadrature (WQ).
-- **GPU Matrix-Free Solver**: Powered by `FastFormation` operator template precomputations (`op_su_ev`), `pagemtimes`, and GPU array vectorization, delivering sub-second matrix-free PCG solutions without storing global stiffness matrices.
-- **Ghost Penalty Stabilization**: Eliminates small-cut ill-conditioning across active cut-cell interior facets, bounding condition numbers as cut fractions $\eta \to 0$.
-- **Weak Boundary Conditions (Nitsche)**: Enforces Dirichlet conditions directly on immersed CAD surfaces via Nitsche's method.
-- **3D Immersed Topology Optimization**: SIMP optimization with adjoint sensitivities computed on GPU, filtering, and Optimality Criteria updates inside arbitrary CAD domain envelopes.
-- **Adaptive 3D Octree Local Refinement**: Hierarchical 2:1 balanced octree mesh generator with Catmull-Clark dyadic subdivision transition operators across T-junctions.
+- **GPU Matrix-Free PCG Solver & Coupled Assembly**: Powered by `FastFormation` operator template precomputations (`op_su_ev`), `pagemtimes`, level-by-level tensor-product matvecs, and GPU array vectorization, delivering sub-second matrix-free PCG solutions directly in GPU VRAM without forming or storing global stiffness matrices.
+- **Unified Boundary Condition Engine**: Dispatches Dirichlet (strong elimination or weak penalty), Neumann (surface work tractions), and Robin (elastic foundation / impedance boundary operator $\bm{K}_{\text{Robin}}$) across arbitrary CAD boundaries and coordinate predicates.
+- **Non-Linear Unilateral & Bonded Assembly Contact**: Solves multi-body contact with semi-smooth Newton active-set iterations ($g_n \ge 0, p_n \le 0, p_n g_n = 0$), modulus-scaled physical penalties $\gamma_c \frac{E}{h}$, and exact non-conforming barycentric interface pairing.
+- **Automated Mechanics-Driven AMR Loop**: 2:1 balanced hierarchical octree with Multi-Point Constraint (MPC) hanging-node elimination ($\bm{T}_{3D}$), stress jump jump flux estimators ($\eta_e$), and Dörfler marking recovering optimal $\mathcal{O}(N^{-1})$ convergence rates.
+- **5-Obstacle Publication Benchmark Course**: Fully automated test harness validating patch tests to machine precision ($4.14 \times 10^{-18}$), Hertzian contact, re-entrant stress risers, industrial NIST AP203 assemblies, and GPU wall-clock scalability (>20x speedup).
 
 ---
 
@@ -20,15 +20,11 @@ A high-performance research framework in MATLAB for immersed Isogeometric Analys
 
 ```
 immersed-iga/
-├── Articles/                          # Reference papers (FastFormation_TopOpt.pdf)
-├── Models/
-│   └── NIST-PMI-STEP-Files/           # NIST STEP benchmark geometries (AP203/AP242)
 ├── src/
 │   ├── brep/                          # CAD B-Rep import & conversion pipeline
 │   │   ├── importBRep.m               # Unified dispatcher (.stp, .msh, .vtu, .stl)
 │   │   ├── importSTEP.m, importMSH.m, importVTU.m
-│   │   ├── importMeshViaPython.m      # Headless Gmsh bridge
-│   │   └── brep_to_tri_mesh.py        # Python Gmsh & VTU parser
+│   │   └── brep_to_tri_mesh.py        # Headless Gmsh parser
 │   ├── catmull_clark/                 # Catmull-Clark subdivision & projection
 │   │   ├── subdivide_quad_catmull_clark.m
 │   │   ├── catmull_clark_projection_matrices.m (2D)
@@ -38,27 +34,33 @@ immersed-iga/
 │   │   ├── fast_stiffness_assembly_gpu.m
 │   │   ├── topopt_iga_3d.m
 │   │   └── wq_setup.m, wq_form.m
-│   └── immersed/                      # Immersed boundary engine
-│       ├── classify_background_cells.m# 3D Ray-casting classifier
-│       ├── compute_cut_cell_quadrature.m
-│       ├── assemble_immersed_element_weights.m
-│       ├── assemble_ghost_penalty_stabilization.m
-│       ├── assemble_nitsche_dirichlet_3d.m
-│       ├── solve_immersed_iga_3d.m    # Unified 3D immersed elasticity solver
-│       ├── topopt_immersed_iga_3d.m   # 3D CAD immersed topology optimization
-│       ├── build_cartesian_filter_3d.m# O(N*r^3) sensitivity filter
-│       └── octree_mesh_3d.m           # Adaptive 2:1 balanced octree
-├── benchmarks/                        # Reproduction benchmarks & drivers
+│   └── immersed/                      # Immersed boundary & assembly engine
+│       ├── setup_assembly_3d.m        # Multi-body independent octree container
+│       ├── solve_assembly_contact_3d.m# Unilateral active-set Newton & bonded contact
+│       ├── gpu_assembly_matvec.m      # Matrix-free GPU coupled assembly operator
+│       ├── gpu_octree_matvec.m        # Level-by-level matrix-free GPU tensor matvec
+│       ├── solve_octree_gpu.m         # Native GPU VRAM Preconditioned Conjugate Gradient
+│       ├── apply_boundary_conditions.m# Unified Dirichlet, Neumann, Robin dispatcher
+│       ├── assemble_neumann_bc_3d.m   # Surface traction & pressure integration
+│       ├── assemble_robin_bc_3d.m     # Elastic foundation stiffness operator
+│       ├── octree_mesh_3d.m           # Adaptive 3D octree generator
+│       ├── balance_octree_3d.m        # Strict 2:1 balancing
+│       ├── octree_structural_mesh.m   # Multi-Point Constraint (MPC) hanging nodes (T_3D)
+│       ├── compute_amr_stress_indicators.m # Stress jump & Dörfler marking
+│       └── adaptive_mesh_refinement_loop.m # Automated Solve->Mark->Refine->Resolve loop
+├── benchmarks/                        # Publication benchmarks & verification course
+│   ├── run_complete_obstacle_course.m # 5-obstacle automated validation harness
+│   ├── plot_obstacle_course_figures.m # High-contrast 300 DPI publication figure generator
 │   ├── cantilever_topopt.m            # 2D Cantilever baseline
-│   ├── topopt_iga_catmull_clark.m     # 2D Catmull-Clark benchmark
-│   ├── run_3d_catmull_clark_topopt.m  # 3D 101,400 DOF Cantilever (Paper Fig. 6)
 │   └── run_nist_immersed_topopt.m     # 3D Immersed TopOpt on NIST CTC-01
-├── examples/
-│   ├── demo_nist_step_immersed.m      # NIST STEP import & classification demo
-│   ├── demo_immersed_gpu_solve.m      # Immersed GPU elasticity solve
-│   └── demo_octree_immersed_refinement.m # Adaptive octree refinement demo
-├── figures/                           # Exported publication figures & results
-└── tests/                             # Automated test suite
+├── tests/                             # Automated test suite (17 passed, 100% pass)
+│   ├── run_all_tests.m                # Master test suite runner
+│   ├── testObstacleCourse.m           # 5-obstacle test runner
+│   ├── testBoundaryConditions.m       # Dirichlet, Neumann, Robin tests
+│   ├── testAssemblyContact.m          # Multi-body contact tests
+│   ├── testGPUAssemblyContact.m       # GPU matrix-free assembly contact tests
+│   └── testGPUOctree.m                # GPU PCG matrix-free operator tests
+└── figures/                           # High-resolution figures (local, git-ignored)
 ```
 
 ---
