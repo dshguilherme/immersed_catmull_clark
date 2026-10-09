@@ -70,11 +70,13 @@ immersed-iga/
 │   │   ├── solver.rs                  # Matrix-free PCG & active-set contact solvers
 │   │   ├── cut_cell.rs                # 3D Ray-casting & cut-cell Gauss quadrature
 │   │   ├── topopt.rs                  # 3D SIMP topology optimization & density filter
+│   │   ├── cad_model.rs               # Labeled CAD bodies, boundary faces, materials, BCs
 │   │   └── bin/
 │   │       ├── obstacle_course.rs     # 5-obstacle verification benchmark binary
 │   │       ├── wgpu_matrixfree_benchmark.rs # WGPU compute shader matrix-free kernel
 │   │       ├── cuda_matrixfree_benchmark.rs # Native CUDA driver API kernel (cudarc)
-│   │       └── topopt_3d.rs           # 3D SIMP topology optimization solver
+│   │       ├── topopt_3d.rs           # 3D SIMP topology optimization solver
+│   │       └── solve_cad.rs           # End-to-end immersed CAD solver with labeled BCs
 ├── scripts/
 │   └── plot_publication_figures.py    # Zero-licensing Python matplotlib publication plotter
 └── figures/                           # High-resolution figures (local, git-ignored)
