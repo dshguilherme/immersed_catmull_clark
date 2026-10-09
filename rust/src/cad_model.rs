@@ -364,6 +364,26 @@ impl CadAssembly {
                             }
                         }
                     }
+
+                    // Fallback to closest master node if no nodes were within tolerance
+                    if fixed_dofs.is_empty() && !mesh.master_node_ids.is_empty() {
+                        let mut min_d = f64::MAX;
+                        let mut closest_m = 0;
+                        for (m_idx, &master_node_id) in mesh.master_node_ids.iter().enumerate() {
+                            let m_coord = mesh.nodes[master_node_id];
+                            let d = ((m_coord[0] - face.centroid[0]).powi(2) + (m_coord[1] - face.centroid[1]).powi(2) + (m_coord[2] - face.centroid[2]).powi(2)).sqrt();
+                            if d < min_d {
+                                min_d = d;
+                                closest_m = m_idx;
+                            }
+                        }
+                        for c in 0..3 {
+                            if components[c] {
+                                fixed_dofs.push(closest_m * 3 + c);
+                                prescribed_values.push(values[c]);
+                            }
+                        }
+                    }
                 }
                 BoundaryConditionType::NeumannTraction { traction } => {
                     // Distribute total traction force F = traction * Area equally to nearby surface master nodes
@@ -383,6 +403,22 @@ impl CadAssembly {
                             }
                         }
                     }
+
+                    // Fallback to closest master node if no nodes were within tolerance
+                    if matched_master_nodes.is_empty() && !mesh.master_node_ids.is_empty() {
+                        let mut min_d = f64::MAX;
+                        let mut closest_m = 0;
+                        for (m_idx, &master_node_id) in mesh.master_node_ids.iter().enumerate() {
+                            let m_coord = mesh.nodes[master_node_id];
+                            let d = ((m_coord[0] - face.centroid[0]).powi(2) + (m_coord[1] - face.centroid[1]).powi(2) + (m_coord[2] - face.centroid[2]).powi(2)).sqrt();
+                            if d < min_d {
+                                min_d = d;
+                                closest_m = m_idx;
+                            }
+                        }
+                        matched_master_nodes.push(closest_m);
+                    }
+
                     if !matched_master_nodes.is_empty() {
                         let n_matched = matched_master_nodes.len() as f64;
                         for &m_idx in &matched_master_nodes {
@@ -415,6 +451,22 @@ impl CadAssembly {
                             }
                         }
                     }
+
+                    // Fallback to closest master node if no nodes were within tolerance
+                    if matched_master_nodes.is_empty() && !mesh.master_node_ids.is_empty() {
+                        let mut min_d = f64::MAX;
+                        let mut closest_m = 0;
+                        for (m_idx, &master_node_id) in mesh.master_node_ids.iter().enumerate() {
+                            let m_coord = mesh.nodes[master_node_id];
+                            let d = ((m_coord[0] - face.centroid[0]).powi(2) + (m_coord[1] - face.centroid[1]).powi(2) + (m_coord[2] - face.centroid[2]).powi(2)).sqrt();
+                            if d < min_d {
+                                min_d = d;
+                                closest_m = m_idx;
+                            }
+                        }
+                        matched_master_nodes.push(closest_m);
+                    }
+
                     if !matched_master_nodes.is_empty() {
                         let n_matched = matched_master_nodes.len() as f64;
                         for &m_idx in &matched_master_nodes {
@@ -431,6 +483,382 @@ impl CadAssembly {
         }
 
         (fixed_dofs, prescribed_values, f_external)
+    }
+
+    /// Loads a CAD assembly and boundary conditions from a JSON string
+    pub fn from_json(json_str: &str) -> Result<Self, String> {
+        let root = parse_json(json_str)?;
+        let obj = root.as_object().ok_or("Root JSON must be an object")?;
+
+        let cad_file = obj.get("cad_file").and_then(|v| v.as_str()).unwrap_or("CantileverBracket");
+        
+        let mat_name = obj.get("material")
+            .and_then(|m| m.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("StructuralSteel");
+        let youngs = obj.get("material")
+            .and_then(|m| m.get("youngs_modulus"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(2.1e5);
+        let poissons = obj.get("material")
+            .and_then(|m| m.get("poissons_ratio"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.30);
+        let density = obj.get("material")
+            .and_then(|m| m.get("density"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(7850.0);
+
+        let material = MaterialProperties {
+            name: mat_name.to_string(),
+            youngs_modulus: youngs,
+            poissons_ratio: poissons,
+            density,
+        };
+
+        // Determine mesh: if cad_file ends with .obj and file exists, load it
+        let mut body = if cad_file.ends_with(".obj") && std::path::Path::new(cad_file).exists() {
+            let obj_content = std::fs::read_to_string(cad_file)
+                .map_err(|e| format!("Failed to read CAD file '{}': {}", cad_file, e))?;
+            CadBody::parse_obj(&obj_content, material)?
+        } else {
+            // Default box mesh [0,0,0] to [2,1,1]
+            let min_b = [0.0, 0.0, 0.0];
+            let max_b = [2.0, 1.0, 1.0];
+            let mesh = TriangleMesh3D::new_box(min_b, max_b);
+            CadBody::new(cad_file, mesh, material)
+        };
+
+        let mut assembly = CadAssembly::new();
+
+        // Process labeled faces and BCs from JSON
+        if let Some(faces_arr) = obj.get("faces").and_then(|v| v.as_array()) {
+            for face_val in faces_arr {
+                if let Some(face_obj) = face_val.as_object() {
+                    let name = face_obj.get("name").and_then(|v| v.as_str()).unwrap_or("Face");
+                    let mut tri_indices = Vec::new();
+                    if let Some(tri_arr) = face_obj.get("triangles").and_then(|v| v.as_array()) {
+                        for t in tri_arr {
+                            if let Some(idx) = t.as_f64() {
+                                tri_indices.push(idx as usize);
+                            }
+                        }
+                    }
+
+                    // Compute area, centroid, normal for face
+                    let mut area = 0.0;
+                    let mut c_sum = [0.0; 3];
+                    let mut n_sum = [0.0; 3];
+                    for &ti in &tri_indices {
+                        if ti < body.mesh.triangles.len() {
+                            let (n, a) = body.triangle_normal_and_area(ti);
+                            area += a;
+                            let tri = body.mesh.triangles[ti];
+                            for k in 0..3 {
+                                c_sum[k] += a * (body.mesh.vertices[tri[0]][k] + body.mesh.vertices[tri[1]][k] + body.mesh.vertices[tri[2]][k]) / 3.0;
+                                n_sum[k] += a * n[k];
+                            }
+                        }
+                    }
+                    if area > 0.0 {
+                        c_sum[0] /= area; c_sum[1] /= area; c_sum[2] /= area;
+                        let nl = (n_sum[0].powi(2) + n_sum[1].powi(2) + n_sum[2].powi(2)).sqrt();
+                        if nl > 0.0 { n_sum[0] /= nl; n_sum[1] /= nl; n_sum[2] /= nl; }
+                    }
+
+                    body.faces.insert(name.to_string(), CadFace {
+                        name: name.to_string(),
+                        triangle_indices: tri_indices,
+                        total_area: area,
+                        centroid: c_sum,
+                        normal: n_sum,
+                    });
+
+                    // Parse Boundary Condition if present
+                    if let Some(bc_obj) = face_obj.get("bc").and_then(|v| v.as_object()) {
+                        let bc_type_str = bc_obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        match bc_type_str {
+                            "Dirichlet" => {
+                                let mut components = [true, true, true];
+                                if let Some(comp_arr) = bc_obj.get("components").and_then(|v| v.as_array()) {
+                                    if comp_arr.len() >= 3 {
+                                        for i in 0..3 {
+                                            components[i] = comp_arr[i].as_bool().unwrap_or(true);
+                                        }
+                                    }
+                                }
+                                let mut values = [0.0, 0.0, 0.0];
+                                if let Some(val_arr) = bc_obj.get("values").and_then(|v| v.as_array()) {
+                                    if val_arr.len() >= 3 {
+                                        for i in 0..3 {
+                                            values[i] = val_arr[i].as_f64().unwrap_or(0.0);
+                                        }
+                                    }
+                                }
+                                assembly.add_boundary_condition(LabeledBoundaryCondition {
+                                    target_face_name: name.to_string(),
+                                    bc_type: BoundaryConditionType::Dirichlet { components, values },
+                                });
+                            }
+                            "NeumannTraction" => {
+                                let mut traction = [0.0, 0.0, 0.0];
+                                if let Some(t_arr) = bc_obj.get("traction").and_then(|v| v.as_array()) {
+                                    if t_arr.len() >= 3 {
+                                        for i in 0..3 {
+                                            traction[i] = t_arr[i].as_f64().unwrap_or(0.0);
+                                        }
+                                    }
+                                }
+                                assembly.add_boundary_condition(LabeledBoundaryCondition {
+                                    target_face_name: name.to_string(),
+                                    bc_type: BoundaryConditionType::NeumannTraction { traction },
+                                });
+                            }
+                            "NeumannPressure" => {
+                                let pressure = bc_obj.get("pressure").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                assembly.add_boundary_condition(LabeledBoundaryCondition {
+                                    target_face_name: name.to_string(),
+                                    bc_type: BoundaryConditionType::NeumannPressure { pressure },
+                                });
+                            }
+                            "RobinFoundation" => {
+                                let kn = bc_obj.get("normal_stiffness").and_then(|v| v.as_f64()).unwrap_or(1e4);
+                                let kt = bc_obj.get("tangential_stiffness").and_then(|v| v.as_f64()).unwrap_or(1e4);
+                                assembly.add_boundary_condition(LabeledBoundaryCondition {
+                                    target_face_name: name.to_string(),
+                                    bc_type: BoundaryConditionType::RobinFoundation {
+                                        normal_stiffness: kn,
+                                        tangential_stiffness: kt,
+                                    },
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        assembly.add_body(body);
+        Ok(assembly)
+    }
+}
+
+// ============================================================================
+// ZERO-DEPENDENCY JSON VALUE PARSER
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum JsonValue {
+    Null,
+    Bool(bool),
+    Number(f64),
+    String(String),
+    Array(Vec<JsonValue>),
+    Object(HashMap<String, JsonValue>),
+}
+
+impl JsonValue {
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            JsonValue::String(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            JsonValue::Number(n) => Some(*n),
+            _ => None,
+        }
+    }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            JsonValue::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    pub fn as_array(&self) -> Option<&Vec<JsonValue>> {
+        match self {
+            JsonValue::Array(a) => Some(a),
+            _ => None,
+        }
+    }
+
+    pub fn as_object(&self) -> Option<&HashMap<String, JsonValue>> {
+        match self {
+            JsonValue::Object(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    pub fn get(&self, key: &str) -> Option<&JsonValue> {
+        self.as_object().and_then(|o| o.get(key))
+    }
+}
+
+pub fn parse_json(input: &str) -> Result<JsonValue, String> {
+    let chars: Vec<char> = input.chars().collect();
+    let mut pos = 0;
+    skip_whitespace(&chars, &mut pos);
+    let val = parse_json_value(&chars, &mut pos)?;
+    skip_whitespace(&chars, &mut pos);
+    Ok(val)
+}
+
+fn skip_whitespace(chars: &[char], pos: &mut usize) {
+    while *pos < chars.len() && (chars[*pos].is_whitespace() || chars[*pos] == '\r' || chars[*pos] == '\n') {
+        *pos += 1;
+    }
+}
+
+fn parse_json_value(chars: &[char], pos: &mut usize) -> Result<JsonValue, String> {
+    skip_whitespace(chars, pos);
+    if *pos >= chars.len() {
+        return Err("Unexpected end of JSON input".to_string());
+    }
+
+    match chars[*pos] {
+        '{' => parse_json_object(chars, pos),
+        '[' => parse_json_array(chars, pos),
+        '"' => parse_json_string(chars, pos).map(JsonValue::String),
+        't' | 'f' => parse_json_bool(chars, pos),
+        'n' => parse_json_null(chars, pos),
+        '-' | '0'..='9' => parse_json_number(chars, pos),
+        c => Err(format!("Unexpected character '{}' at position {}", c, pos)),
+    }
+}
+
+fn parse_json_object(chars: &[char], pos: &mut usize) -> Result<JsonValue, String> {
+    *pos += 1; // skip '{'
+    let mut map = HashMap::new();
+    skip_whitespace(chars, pos);
+
+    if *pos < chars.len() && chars[*pos] == '}' {
+        *pos += 1;
+        return Ok(JsonValue::Object(map));
+    }
+
+    loop {
+        skip_whitespace(chars, pos);
+        if *pos >= chars.len() || chars[*pos] != '"' {
+            return Err(format!("Expected string key in object at position {}", pos));
+        }
+        let key = parse_json_string(chars, pos)?;
+        skip_whitespace(chars, pos);
+        if *pos >= chars.len() || chars[*pos] != ':' {
+            return Err(format!("Expected ':' after key '{}' at position {}", key, pos));
+        }
+        *pos += 1; // skip ':'
+        let val = parse_json_value(chars, pos)?;
+        map.insert(key, val);
+
+        skip_whitespace(chars, pos);
+        if *pos < chars.len() && chars[*pos] == ',' {
+            *pos += 1;
+            continue;
+        } else if *pos < chars.len() && chars[*pos] == '}' {
+            *pos += 1;
+            break;
+        } else {
+            return Err(format!("Expected ',' or '}}' at position {}", pos));
+        }
+    }
+
+    Ok(JsonValue::Object(map))
+}
+
+fn parse_json_array(chars: &[char], pos: &mut usize) -> Result<JsonValue, String> {
+    *pos += 1; // skip '['
+    let mut vec = Vec::new();
+    skip_whitespace(chars, pos);
+
+    if *pos < chars.len() && chars[*pos] == ']' {
+        *pos += 1;
+        return Ok(JsonValue::Array(vec));
+    }
+
+    loop {
+        let val = parse_json_value(chars, pos)?;
+        vec.push(val);
+        skip_whitespace(chars, pos);
+        if *pos < chars.len() && chars[*pos] == ',' {
+            *pos += 1;
+            continue;
+        } else if *pos < chars.len() && chars[*pos] == ']' {
+            *pos += 1;
+            break;
+        } else {
+            return Err(format!("Expected ',' or ']' at position {}", pos));
+        }
+    }
+
+    Ok(JsonValue::Array(vec))
+}
+
+fn parse_json_string(chars: &[char], pos: &mut usize) -> Result<String, String> {
+    *pos += 1; // skip opening '"'
+    let mut s = String::new();
+    while *pos < chars.len() {
+        let c = chars[*pos];
+        *pos += 1;
+        if c == '"' {
+            return Ok(s);
+        } else if c == '\\' {
+            if *pos >= chars.len() {
+                return Err("Unterminated escape sequence in string".to_string());
+            }
+            let esc = chars[*pos];
+            *pos += 1;
+            match esc {
+                '"' => s.push('"'),
+                '\\' => s.push('\\'),
+                '/' => s.push('/'),
+                'n' => s.push('\n'),
+                't' => s.push('\t'),
+                'r' => s.push('\r'),
+                other => s.push(other),
+            }
+        } else {
+            s.push(c);
+        }
+    }
+    Err("Unterminated string literal".to_string())
+}
+
+fn parse_json_number(chars: &[char], pos: &mut usize) -> Result<JsonValue, String> {
+    let start = *pos;
+    if chars[*pos] == '-' {
+        *pos += 1;
+    }
+    while *pos < chars.len() && (chars[*pos].is_ascii_digit() || chars[*pos] == '.' || chars[*pos] == 'e' || chars[*pos] == 'E' || chars[*pos] == '+' || chars[*pos] == '-') {
+        *pos += 1;
+    }
+    let num_str: String = chars[start..*pos].iter().collect();
+    let num: f64 = num_str.parse().map_err(|e| format!("Invalid number '{}': {:?}", num_str, e))?;
+    Ok(JsonValue::Number(num))
+}
+
+fn parse_json_bool(chars: &[char], pos: &mut usize) -> Result<JsonValue, String> {
+    if chars[*pos..].starts_with(&['t', 'r', 'u', 'e']) {
+        *pos += 4;
+        Ok(JsonValue::Bool(true))
+    } else if chars[*pos..].starts_with(&['f', 'a', 'l', 's', 'e']) {
+        *pos += 5;
+        Ok(JsonValue::Bool(false))
+    } else {
+        Err(format!("Invalid boolean token at position {}", pos))
+    }
+}
+
+fn parse_json_null(chars: &[char], pos: &mut usize) -> Result<JsonValue, String> {
+    if chars[*pos..].starts_with(&['n', 'u', 'l', 'l']) {
+        *pos += 4;
+        Ok(JsonValue::Null)
+    } else {
+        Err(format!("Invalid null token at position {}", pos))
     }
 }
 
@@ -490,5 +918,45 @@ f 5 6 7
         assert!(body.faces.contains_key("TopLoad"));
         assert_eq!(body.faces.get("BottomClamp").unwrap().triangle_indices.len(), 2);
         assert_eq!(body.faces.get("TopLoad").unwrap().triangle_indices.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_json_and_cad_assembly() {
+        let json_input = r#"{
+            "cad_file": "CantileverTest",
+            "material": {
+                "name": "Steel",
+                "youngs_modulus": 200000.0,
+                "poissons_ratio": 0.28,
+                "density": 7800.0
+            },
+            "faces": [
+                {
+                    "name": "FixFace",
+                    "triangles": [8, 9],
+                    "bc": {
+                        "type": "Dirichlet",
+                        "components": [true, true, true],
+                        "values": [0.0, 0.0, 0.0]
+                    }
+                },
+                {
+                    "name": "ForceFace",
+                    "triangles": [10, 11],
+                    "bc": {
+                        "type": "NeumannTraction",
+                        "traction": [0.0, -50.0, 0.0]
+                    }
+                }
+            ]
+        }"#;
+
+        let assembly = CadAssembly::from_json(json_input).expect("Failed to parse CAD JSON");
+        assert_eq!(assembly.bodies.len(), 1);
+        assert_eq!(assembly.bodies[0].material.name, "Steel");
+        assert_eq!(assembly.bodies[0].material.youngs_modulus, 200000.0);
+        assert_eq!(assembly.boundary_conditions.len(), 2);
+        assert!(assembly.bodies[0].faces.contains_key("FixFace"));
+        assert!(assembly.bodies[0].faces.contains_key("ForceFace"));
     }
 }
