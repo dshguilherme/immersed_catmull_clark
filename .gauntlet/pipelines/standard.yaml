@@ -1,0 +1,220 @@
+# The default Gauntlet pipeline — the 3-gate workflow (FR-5.1).
+#
+# PRD gate → plan gate → per-phase gates, each artifact run through the
+# adversarial_cycle primitive (review → triage → fix → confirm). This is the
+# polished, general-purpose pipeline (`gauntlet run <slug>` uses it by default);
+# `pipelines/bootstrap.yaml` is the minimal switchover-#2 expression of the same
+# loop for Gauntlet's own P5–P7.
+#
+# ENTRY CONTRACT (FR-10.1): Gauntlet does not author PRDs. The human writes the
+# run's prd.md (under the configured run_root — .gauntlet/runs/<slug>/ by
+# default) and `gauntlet run` begins at adversarial review; the run refuses to
+# start while prd.md is absent or still the scaffolded stub.
+#
+# Commit labels (BOOTSTRAP-NOTES #28, ratified 2026-06-12): the PRD and plan
+# review loops are not numbered phases, so their cycles carry `phase: PRD` /
+# `phase: PLAN` and their fix rounds commit as `PRD.1:` / `PLAN.1:`. Numbered
+# phases (P1, P2, …) come from the plan's `gauntlet-phases` block and are the
+# only `rollback --phase N` boundaries.
+
+name: standard
+version: 1
+
+stages:
+  # --- PRD gate -------------------------------------------------------------
+  - id: prd
+    steps:
+      # The human-authored prd.md is already committed (it is the run's seed);
+      # the cycle reviews it as a document and applies accepted fixes.
+      - {id: prd-cycle, type: adversarial_cycle, mode: artifact, artifact: prd.md,
+         phase: PRD, triager: triage, fixer: builder,
+         reviewers: [{profile: reviewer, lens: correctness},
+                     {profile: reviewer, lens: spec-coverage}],
+         escalation_agent: escalation, max_rounds: 2,
+         review_prompt: prompts/review-document.md}
+      - {id: prd-approve, type: human_gate,
+         show: [prd.md, findings.json, triage.json, confirm.json]}
+
+  # --- plan gate ------------------------------------------------------------
+  - id: plan
+    steps:
+      # No `halt_on:` here: plan-author returns ONLY the plan document
+      # (prompts/plan-author.md), which legitimately quotes the FR-10.4
+      # "UPSTREAM CONFLICT" protocol as prose — gating on that marker only ever
+      # false-positives and discards the authored plan.md. A genuinely broken
+      # PRD is caught downstream at plan-cycle / plan-approve.
+      # `validate: plan_phases` (FR-2.3) checks the authored gauntlet-phases block
+      # in-step: a malformed block is repaired in-session (bounded, FR-2.1) or
+      # parks `artifact_invalid` for a hand-edit-then-resume (FR-2.2), instead of
+      # sailing through review to detonate at the phases fan-out. plan-lint below
+      # remains the fail-closed backstop gate.
+      - {id: plan-author, type: agent_task, agent: builder,
+         prompt: prompts/plan-author.md, inputs: [prd.md], output: plan.md,
+         phase: PLAN, commit_output: true, validate: plan_phases}
+      # plan-author commits its own deliverable (PLAN: …) as it finalizes, so HEAD
+      # advances at production time: the plan survives a crash before review, and
+      # an unrelated dirty file can no longer defeat the review baseline (the
+      # artifact-mode cycle's baseline commit remains a fallback for producers
+      # that do not set commit_output).
+      # max_rounds 3 (pipeline-effectiveness FR-6.1, P9): a carried remainder (an
+      # accepted `partially_resolved` finding, forced non-converged) needs a round
+      # to land before max-rounds escalation parks. The bump is scoped to
+      # plan-cycle/impl-cycle per FR-6.1; the prd-cycle above stays at 2. The
+      # fail-closed terminus (escalate to human at max-rounds) is unchanged.
+      # `review_against: prd.md` (issue #80) inlines the approved PRD alongside
+      # the plan for round 1, which is what makes review-document.md's mandatory
+      # FR-by-FR coverage sweep executable: artifact mode otherwise inlines only
+      # the artifact under review, so reviewers are not given the approved PRD
+      # as explicit review context.
+      # The prd-cycle above deliberately does NOT set it — a PRD has no upstream
+      # spec to owe coverage to, and the sweep is inert without the block.
+      - {id: plan-cycle, type: adversarial_cycle, mode: artifact, artifact: plan.md,
+         phase: PLAN, triager: triage, fixer: builder,
+         reviewers: [{profile: reviewer, lens: correctness},
+                     {profile: reviewer, lens: spec-coverage}],
+         escalation_agent: escalation, max_rounds: 3,
+         review_against: prd.md,
+         review_prompt: prompts/review-document.md}
+      # Deterministic structural gate (FR-5.1): the prose reviewer above never
+      # parses the gauntlet-phases block, so a malformed block (e.g. an unquoted
+      # `schema:` colon) would pass review and only crash later when the phases
+      # stage fans out. plan-lint runs the same parser the foreach uses, so a
+      # structurally unrunnable plan halts here instead of reaching approval.
+      - {id: plan-lint, type: phase_lint, artifact: plan.md}
+      # #134: `preflight: plan_preconditions` — `gauntlet approve` first
+      # resolves every precondition the plan's gauntlet-phases block declares
+      # (data files, env vars, provisioning commands) and refuses while any is
+      # unmet, so a phase never parks mid-run on something discoverable before
+      # the first agent launched. `--skip-preflight` approves anyway (audited).
+      - {id: plan-approve, type: human_gate, preflight: plan_preconditions,
+         show: [plan.md, findings.json, triage.json, confirm.json]}
+
+  # --- phase loop (one iteration per plan.phases entry) ---------------------
+  - id: phases
+    foreach: plan.phases              # plan-author emits the structured phase list
+    steps:
+      # FR-1.1 scoped context (P6): the builder gets prd.md BY REFERENCE (path
+      # only — it reads it on demand) and plan.md as the CURRENT PHASE excerpt +
+      # path, instead of both full documents inlined. Cuts per-implement payload
+      # sharply on multi-phase runs; the builder (claude-code) reads the repo, so
+      # the reference/phase modes are load-validated as capable (FR-1.3). Q3
+      # guardrail: the next real run after this PRD merges is the comparison
+      # baseline; a miss reverts these two modes to `inline` (config-only).
+      # FR-6.3: `disposition_agent: mechanic` routes the MECHANICAL resume-
+      # disposition emission (the structured classification of a `--response`
+      # decision on this step's UPSTREAM CONFLICT park) to the cheap profile
+      # instead of the builder. A re-park/amend classification costs zero builder
+      # window; only a `proceed` re-drives the builder to actually implement.
+      # #134: `preconditions_from: plan` re-resolves the plan-level items plus
+      # THIS phase's own before the builder launches; an unmet item fails the
+      # step as a re-runnable precondition (no agent invoked, no tokens spent).
+      - {id: implement, type: agent_task, agent: builder,
+         preconditions_from: plan,
+         disposition_agent: mechanic,
+         prompt: prompts/implement-phase.md,
+         inputs: [{name: prd.md, mode: reference}, {name: plan.md, mode: phase}],
+         halt_on: "UPSTREAM CONFLICT"}
+      - {id: tests, type: shell, test_scope: phase, run: "{{config.test_command}}",
+         timeout_s: 1800, on_fail: {route_to: implement, max_retries: 2}}
+      # clean worktree + commit BEFORE the reviewer handoff (FR-9.3); the phase
+      # prefix (P1, P2, …) comes from the foreach item's id. FR-6.3: the commit
+      # message is a MECHANICAL draft — the cheap `mechanic` profile drafts it
+      # (still format-validated + redrafted), not the builder.
+      - {id: phase-commit, type: commit, message_agent: mechanic,
+         prompt: prompts/commit-message.md, plan_section: plan.md}
+      # Deterministic completeness gate (FR-3.2): the implement step's completion
+      # contract produces artifacts/acceptance-map.json, mapping every acceptance
+      # clause of this phase to >=1 real pytest node id. This gate proves citation
+      # + existence — every clause maps and every cited id appears in
+      # `pytest --collect-only` — and parks the phase (naming the gap) otherwise,
+      # before any reviewer budget is spent. It is the structural close of the #54
+      # silent-partial-delivery class. Enumeration is a bounded engine subprocess
+      # in a DISPOSABLE COPY with a stripped env, its command resolved from the
+      # project's own test environment (collectors.resolve_command; overridable
+      # via `collectors.pytest.command`) — deterministic, no LLM in the evidence
+      # path (PR #59 review F3/F4/F7).
+      - {id: acceptance-gate, type: acceptance_gate, collector: pytest,
+         map: artifacts/acceptance-map.json}
+      # Behavioral verifier sub-step (pipeline-effectiveness FR-2.1, P5): between
+      # review and triage, the `verifier` (claude-code) profile executes the
+      # deliverable in a DISPOSABLE copy of the post-handoff worktree under the
+      # judge PreToolUse hook (read/write confined to the copy, network default-
+      # deny, secret-stripped env). Fail-closed: an unhooked/absent backend, a
+      # copy/launch failure, or a real-worktree mutation parks the cycle
+      # (engine/verify.py). Its behavioral findings join the merged panel and flow
+      # through triage/fix/confirm; `metrics.verifier.*` records the §9
+      # behavioral-signal instrument (legit findings + verifier cost).
+      # `disposition_agent` classifies an FR-10.4 response before the paid panel
+      # re-drive. A proceed decision also authorizes the engine to consume the
+      # exact prior finding-root/target pair if triage repeats it (#106); a new
+      # root or artifact still parks fail-closed.
+      - {id: impl-cycle, type: adversarial_cycle, mode: code_review,
+         triager: triage, fixer: builder, disposition_agent: mechanic,
+         reviewers: [{profile: reviewer, lens: correctness},
+                     {profile: reviewer, lens: spec-coverage}],
+         verifier: verifier,
+         escalation_agent: escalation, max_rounds: 3,
+         review_prompt: prompts/review-code.md}
+      # Post-cycle re-check (PR #59 review F1): the pre-cycle acceptance gate's
+      # guarantee decays the moment a fix round touches a cited test — a P<N>.x
+      # commit can rename/remove a mapped node id AFTER the gate blessed the map
+      # (this run's own P9 artifact shipped exactly that staleness). The same
+      # deterministic check re-runs here so citation+existence holds for the
+      # tree the phase actually ships, and deferral reconciliation now sees the
+      # fix commits' bodies too (review F2 — the handler always collected P<N>.x
+      # bodies; it just never ran after they existed). This instance satisfies
+      # the FR-4.1 evidence-freshness conjunct for the acceptance signal when
+      # fix commits landed. cycle-fix.md obliges the fixer to update the map in
+      # the same fix commit when a fix renames/moves a cited test.
+      - {id: acceptance-recheck, type: acceptance_gate, collector: pytest,
+         map: artifacts/acceptance-map.json}
+      # Post-cycle test re-run (FR-4.1 evidence freshness). The `tests` step above
+      # runs BEFORE the cycle, so once a round lands a P<N>.x fix commit its record
+      # vouches for a tree the fix then changed — stale evidence the freshness
+      # conjunct parks on. `acceptance-recheck` re-proves the acceptance signal;
+      # this re-proves the tests signal, against the tree the phase actually ships.
+      # Without it the gate below could never auto-approve any phase that fixed
+      # anything, which is nearly every phase.
+      # A failing recheck routes back to `impl-cycle` (#134), not to a fresh
+      # `implement`: the tree it failed on is the cycle's own fix rounds, so the
+      # cycle owns the repair — its verifier executes the suite in the disposable
+      # copy and surfaces the failure as a finding the fixer acts on. The route
+      # resets impl-cycle, acceptance-recheck and this step for a fresh attempt
+      # (stale cycle checkpoints cleared, base_sha re-stamped at re-entry). One
+      # retry: a second recheck failure surfaces FAILED, and every later plain
+      # `gauntlet resume` re-arms exactly one more route per human action — the
+      # exit is the pipeline's own routing, never git surgery.
+      - {id: tests-recheck, type: shell, test_scope: phase, run: "{{config.test_command}}",
+         timeout_s: 1800, on_fail: {route_to: impl-cycle, max_retries: 1}}
+      # Evidence-tiered phase gate (FR-4.1). Policy `auto_when_clean`: the strict
+      # §4.2 conjunction auto-approves and records an evidence snapshot; ANY miss
+      # parks for a human exactly as a plain gate would. Note what this changes on
+      # this pipeline: there was no phase gate here at all, so phases proceeded
+      # unconditionally after a converged cycle. This gate does not remove a human
+      # step — it ADDS a fail-closed stop for phases whose evidence is ambiguous,
+      # while clean phases keep flowing. The predicate turns on whether anything
+      # serious is still OPEN (v0.5), not on whether review found nothing: the
+      # raised-based form measured 0/9 on this repo's own run, because a working
+      # adversarial panel always finds something. FR-4.1 requires a verifier on
+      # any phase declaring this policy — impl-cycle configures one above.
+      - {id: phase-gate, type: human_gate, policy: auto_when_clean,
+         show: [findings.json, triage.json, confirm.json, acceptance-map.json]}
+
+  # --- retrospective + governed self-improvement (FR-6.2/6.3; active in P7) --
+  # Each agent self-critiques the run; the cheap `proposer` synthesises feedback
+  # + retros into path-contained diffs under retro/proposals/. Nothing applies
+  # automatically — `gauntlet proposals review` is the human ratification gate
+  # (FR-6.4). `gauntlet feedback <run>` captures human feedback at run end or
+  # later; `gauntlet report --trend` reads the cross-run metrics (FR-6.6).
+  - id: final-validation
+    when: config.phase_test_command
+    steps:
+      - {id: full-tests, type: shell, test_scope: full, run: "{{config.test_command}}",
+         timeout_s: 1800}
+
+  - id: retro
+    steps:
+      - {id: retrospective, type: retrospective,
+         agents: [builder, reviewer], proposer: triage,
+         retro_prompt: prompts/retro.md,
+         synthesis_prompt: prompts/proposal-synthesis.md}

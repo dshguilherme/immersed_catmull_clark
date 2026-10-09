@@ -1,6 +1,5 @@
 % TEST_BREP_IMPORT
 % Verifies B-Rep importing across supported CAD formats
-clear; clc;
 this_dir = fileparts(mfilename('fullpath'));
 addpath(genpath(fullfile(this_dir, '..', 'src')));
 
