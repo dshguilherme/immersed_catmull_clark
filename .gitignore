@@ -32,7 +32,7 @@ figures/
 Models/
 **/Models/
 
-# Documents & LaTeX
+# Documents & LaTeX (User requested no manuscript or tex files)
 *.pdf
 *.aux
 *.out
@@ -41,8 +41,15 @@ Models/
 *.blg
 *.synctex*
 *.tex
+*.cls
+*.bst
+*.bib
 Articles/
 **/Articles/
+manuscript/
+**/manuscript/
+papers/
+**/papers/
 
 # Python cache & OS files
 __pycache__/
