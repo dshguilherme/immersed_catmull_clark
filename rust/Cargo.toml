@@ -10,6 +10,7 @@ wgpu = "22.0"
 pollster = "0.3"
 bytemuck = { version = "1.16", features = ["derive"] }
 cudarc = { version = "0.19", default-features = false, features = ["driver", "dynamic-loading", "cuda-12080", "nvrtc"] }
+rayon = "1.10"
 
 [[bin]]
 name = "obstacle_course"

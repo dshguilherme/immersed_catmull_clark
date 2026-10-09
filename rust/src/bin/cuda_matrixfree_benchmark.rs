@@ -64,9 +64,10 @@ fn main() -> Result<(), DriverError> {
         let mut y_dev = stream.alloc_zeros::<f32>(num_elem * 24)?;
 
         let n_elem_u32 = num_elem as u32;
+        // 8 warps per block (256 threads) -> each block computes 8 elements in parallel
         let cfg = LaunchConfig {
-            grid_dim: ((n_elem_u32 + 63) / 64, 1, 1),
-            block_dim: (64, 1, 1),
+            grid_dim: ((n_elem_u32 + 7) / 8, 1, 1),
+            block_dim: (256, 1, 1),
             shared_mem_bytes: 0,
         };
 

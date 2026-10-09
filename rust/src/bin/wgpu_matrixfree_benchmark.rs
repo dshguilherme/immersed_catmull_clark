@@ -3,6 +3,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use pollster::block_on;
+use rayon::prelude::*;
 use std::time::Instant;
 use wgpu::util::DeviceExt;
 
@@ -344,7 +345,7 @@ fn main() {
             if i + 1 < 24 { ke_template[i * 24 + i + 1] = -0.5; }
         }
 
-        // Benchmark Rust CPU Matvec
+        // Benchmark Rust CPU Matvec (Single-threaded)
         let n_cpu_runs = 100;
         let mut y_cpu = vec![0.0f32; total_dofs];
         let t_cpu_start = Instant::now();
@@ -368,6 +369,31 @@ fn main() {
             }
         }
         let cpu_time_ms = (t_cpu_start.elapsed().as_secs_f64() * 1000.0) / (n_cpu_runs as f64);
+
+        // Benchmark Rust CPU Rayon Multi-threaded Matvec
+        let mut y_elem_rayon = vec![0.0f32; num_elem * 24];
+        let t_rayon_start = Instant::now();
+        for _ in 0..n_cpu_runs {
+            y_elem_rayon.par_chunks_mut(24)
+                .enumerate()
+                .for_each(|(e, y_loc)| {
+                    let w = elem_weights[e];
+                    let offset = e * 24;
+                    let mut p_loc = [0.0f32; 24];
+                    for i in 0..24 {
+                        p_loc[i] = p_vec[elem_dofs[offset + i] as usize];
+                    }
+                    for i in 0..24 {
+                        let mut sum = 0.0f32;
+                        let row = i * 24;
+                        for j in 0..24 {
+                            sum += ke_template[row + j] * p_loc[j];
+                        }
+                        y_loc[i] = w * sum;
+                    }
+                });
+        }
+        let rayon_time_ms = (t_rayon_start.elapsed().as_secs_f64() * 1000.0) / (n_cpu_runs as f64);
 
         // Persistent VRAM GPU benchmark (simulating in-solver CG iterations where buffers stay in VRAM)
         let uniforms = Uniforms {
@@ -437,12 +463,12 @@ fn main() {
         let gpu_gflops = (num_elem as f64 * 24.0 * 24.0 * 2.0) / (gpu_vram_time_ms * 1e-3) / 1e9;
 
         println!(
-            "  Ne={:>5} | DOFs: {:>6} | Rust CPU: {:>6.3} ms | Rust WGPU (VRAM): {:>6.3} ms ({:>5.1} GFLOP/s)",
-            num_elem, total_dofs, cpu_time_ms, gpu_vram_time_ms, gpu_gflops
+            "  Ne={:>5} | DOFs: {:>6} | CPU (1T): {:>6.3} ms | CPU (Rayon): {:>6.3} ms | WGPU: {:>6.3} ms ({:>5.1} GFLOP/s)",
+            num_elem, total_dofs, cpu_time_ms, rayon_time_ms, gpu_vram_time_ms, gpu_gflops
         );
     }
 
-    // Benchmark Cox-de Boor 1M points in Rust
+    // Benchmark Cox-de Boor 1M points in Rust (Single vs Multi-Thread)
     println!("\n--- [2] COX-DE BOOR 1D B-SPLINE EVALUATION (1,000,000 POINTS, p=3) ---");
     let knots = vec![0.0, 0.0, 0.0, 0.0, 0.25, 0.5, 0.75, 1.0, 1.0, 1.0, 1.0];
     let n_pts = 1_000_000;
@@ -454,7 +480,15 @@ fn main() {
     let t_bspline = Instant::now();
     let _ = immersed_iga::bspline::evaluate_bspline_basis_1d(3, &knots, &u_pts);
     let bspline_time_ms = t_bspline.elapsed().as_secs_f64() * 1000.0;
-    println!("--> Cox-de Boor (1M points, p=3): Rust Time = {:.2} ms", bspline_time_ms);
+
+    let t_bspline_rayon = Instant::now();
+    let chunk_size = 50_000;
+    let _ : Vec<Vec<Vec<f64>>> = u_pts.par_chunks(chunk_size)
+        .map(|chunk| immersed_iga::bspline::evaluate_bspline_basis_1d(3, &knots, chunk))
+        .collect();
+    let bspline_rayon_time_ms = t_bspline_rayon.elapsed().as_secs_f64() * 1000.0;
+
+    println!("--> Cox-de Boor (1M points, p=3): Single-Thread = {:.2} ms | Rayon Multi-Thread = {:.2} ms", bspline_time_ms, bspline_rayon_time_ms);
 
     println!("========================================================================");
     println!("  RUST BENCHMARK SUITE COMPLETE");

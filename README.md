@@ -84,14 +84,16 @@ immersed-iga/
 Benchmarks executed on **NVIDIA GeForce RTX 2050 (4 GB VRAM, Ampere GA107)** with identical problem configurations and mathematical formulations.
 
 ### 1. Matrix-Free Element-Level MatVec ($y_e = w_e K_e p_e$)
-Evaluates tensor-product contractions without forming or storing global stiffness matrices (three-way comparison across backends):
+Evaluates tensor-product contractions without forming or storing global stiffness matrices (multi-backend benchmark on RTX 2050):
 
-| Elements ($N_e$) | Total DOFs | MATLAB CPU | MATLAB GPU (`gpuArray`) | Rust Native CPU | Rust WGPU (Compute Shader) | Rust Native CUDA (`cudarc` PTX) | Peak GPU Throughput |
-| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **500** | 12,000 | 0.052 ms | 0.084 ms | 0.064 ms | 0.048 ms | **0.021 ms** | **27.3 GFLOP/s** |
-| **2,000** | 48,000 | 0.080 ms | 0.096 ms | 0.263 ms | 0.042 ms | **0.026 ms** | **89.0 GFLOP/s** |
-| **8,000** | 192,000 | 0.222 ms | 0.126 ms | 1.029 ms | 0.084 ms | **0.074 ms** | **125.2 GFLOP/s** |
-| **32,000** | 768,000 | 1.027 ms | 0.243 ms | 4.236 ms | **0.327 ms** | 0.784 ms | **112.7 GFLOP/s** |
+| Elements ($N_e$) | Total DOFs | MATLAB CPU | MATLAB GPU (`gpuArray`) | Rust CPU (1T) | Rust CPU (Rayon) | Rust WGPU (DX12) | Rust Native CUDA (Warp-Coalesced) | Peak GPU Throughput |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **500** | 12,000 | 0.052 ms | 0.084 ms | 0.070 ms | 0.202 ms | 0.048 ms | **0.012 ms** | 47.7 GFLOP/s |
+| **2,000** | 48,000 | 0.080 ms | 0.096 ms | 0.263 ms | 0.292 ms | 0.061 ms | **0.016 ms** | 144.9 GFLOP/s |
+| **8,000** | 192,000 | 0.222 ms | 0.126 ms | 1.064 ms | 0.550 ms | 0.085 ms | **0.034 ms** | 269.8 GFLOP/s |
+| **32,000** | 768,000 | 1.027 ms | 0.243 ms | 4.333 ms | 1.145 ms | 0.325 ms | **0.120 ms** | **306.9 GFLOP/s** |
+
+> **CUDA Warp-Coalesced Architecture**: Uses 1 warp (32 threads) per element with 100% coalesced 96-byte memory transactions, shared-memory stiffness caching (`s_ke`), and parallel row contraction, delivering **>306 GFLOP/s** sustained throughput (over **2× faster than MATLAB's cuBLAS**).
 
 > **Note on GPU Scaling**: In iterative PCG solvers, vectors remain persistent in VRAM. Rust's WGPU compute shader achieves **>112 GFLOP/s** sustain across 32,000 elements with zero host memory bandwidth bottlenecks.
 
@@ -99,7 +101,7 @@ Evaluates tensor-product contractions without forming or storing global stiffnes
 
 | Benchmark Task | Problem Size | MATLAB Wall-Clock | Rust Native Wall-Clock | Rust Speedup |
 | :--- | :--- | :---: | :---: | :---: |
-| **Cox-de Boor 1D B-spline Basis** | 1,000,000 evaluation points ($p=3$) | 139.1 ms | 455.3 ms | 0.31x *(MATLAB JIT array-vectorized)* |
+| **Cox-de Boor 1D B-spline Basis** | 1,000,000 evaluation points ($p=3$) | 139.1 ms | **177.3 ms** *(Rayon multithread)* | 0.79x *(MATLAB JIT vs Rust Rayon)* |
 | **Octree 2:1 Balancing + MPC Assembly** | 22 leaf cells, 64 nodes, 123 DOFs | 396.4 ms | **0.051 ms** (51 µs) | **7,770x faster** |
 | **Full 5-Obstacle Course (Total)** | Patch Test, Hertzian, AMR, STEP, PCG | 3,080.0 ms (3.08 s) | **0.244 ms** (244 µs) | **12,620x faster** |
 
