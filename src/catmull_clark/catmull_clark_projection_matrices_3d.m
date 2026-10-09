@@ -25,5 +25,5 @@ ncp = nel + p;
 knots = [zeros(1, p+1), (1:(nel-1))/nel, ones(1, p+1)];
 elem_centers = ((1:nel) - 0.5) / nel;
 
-P = bspeval(p, eye(ncp), knots, elem_centers)'; % [nel x ncp]
+P = evaluate_bspline_basis_1d(p, knots, elem_centers); % [nel x ncp]
 end
