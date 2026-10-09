@@ -24,6 +24,10 @@ path = "src/bin/wgpu_matrixfree_benchmark.rs"
 name = "cuda_matrixfree_benchmark"
 path = "src/bin/cuda_matrixfree_benchmark.rs"
 
+[[bin]]
+name = "topopt_3d"
+path = "src/bin/topopt_3d.rs"
+
 [profile.release]
 opt-level = 3
 lto = true

@@ -68,10 +68,15 @@ immersed-iga/
 │   │   ├── octree.rs                  # 3D 2:1 balanced adaptive octree engine
 │   │   ├── structural_mesh.rs         # MPC hanging node constraint engine
 │   │   ├── solver.rs                  # Matrix-free PCG & active-set contact solvers
+│   │   ├── cut_cell.rs                # 3D Ray-casting & cut-cell Gauss quadrature
+│   │   ├── topopt.rs                  # 3D SIMP topology optimization & density filter
 │   │   └── bin/
 │   │       ├── obstacle_course.rs     # 5-obstacle verification benchmark binary
 │   │       ├── wgpu_matrixfree_benchmark.rs # WGPU compute shader matrix-free kernel
-│   │       └── cuda_matrixfree_benchmark.rs # Native CUDA driver API kernel (cudarc)
+│   │       ├── cuda_matrixfree_benchmark.rs # Native CUDA driver API kernel (cudarc)
+│   │       └── topopt_3d.rs           # 3D SIMP topology optimization solver
+├── scripts/
+│   └── plot_publication_figures.py    # Zero-licensing Python matplotlib publication plotter
 └── figures/                           # High-resolution figures (local, git-ignored)
 ```
 
