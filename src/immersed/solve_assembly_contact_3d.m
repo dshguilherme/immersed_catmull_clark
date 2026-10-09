@@ -27,11 +27,13 @@ function [u_assembly, contact_results] = solve_assembly_contact_3d(assembly, F_e
 %                       .min_gap       - Minimum normal gap after solution
 %                       .converged     - Logical true if converged
 
-if nargin < 4, opts = struct(); end
 if ~isfield(opts, 'mode'), opts.mode = 'unilateral'; end
 if ~isfield(opts, 'gamma_c'), opts.gamma_c = 50.0; end
 if ~isfield(opts, 'max_iter'), opts.max_iter = 20; end
 if ~isfield(opts, 'tol'), opts.tol = 1e-4; end
+if ~isfield(opts, 'linear_solver'), opts.linear_solver = 'direct'; end % 'direct' or 'gpu_pcg'
+if ~isfield(opts, 'pcg_tol'), opts.pcg_tol = 1e-6; end
+if ~isfield(opts, 'pcg_max_iter'), opts.pcg_max_iter = 1000; end
 
 total_dof = assembly.total_dof;
 
@@ -118,14 +120,8 @@ if strcmpi(opts.mode, 'bonded')
     K_sys = K_base + K_contact;
     F_sys = F_total + F_contact;
     
-    u_assembly = zeros(total_dof, 1);
-    if ~isempty(fixed_dofs)
-        u_assembly(fixed_dofs) = prescribed_vals;
-        F_sys_free = F_sys(free_dofs) - K_sys(free_dofs, fixed_dofs) * prescribed_vals;
-        u_assembly(free_dofs) = K_sys(free_dofs, free_dofs) \ F_sys_free;
-    else
-        u_assembly = K_sys \ F_sys;
-    end
+    u_assembly = solve_coupled_linear_step(assembly, K_sys, F_sys, K_contact, K_bc_extra, ...
+                                           fixed_dofs, prescribed_vals, free_dofs, opts);
     
     contact_results.iterations = 1;
     contact_results.converged = true;
@@ -169,14 +165,8 @@ for iter = 1:opts.max_iter
     F_sys = F_total + F_contact;
     
     % Solve linearized system
-    u_new = zeros(total_dof, 1);
-    if ~isempty(fixed_dofs)
-        u_new(fixed_dofs) = prescribed_vals;
-        F_sys_free = F_sys(free_dofs) - K_sys(free_dofs, fixed_dofs) * prescribed_vals;
-        u_new(free_dofs) = K_sys(free_dofs, free_dofs) \ F_sys_free;
-    else
-        u_new = K_sys \ F_sys;
-    end
+    u_new = solve_coupled_linear_step(assembly, K_sys, F_sys, K_contact, K_bc_extra, ...
+                                      fixed_dofs, prescribed_vals, free_dofs, opts);
     
     du_norm = norm(u_new - u_assembly) / max(1.0, norm(u_new));
     u_assembly = u_new;
@@ -482,4 +472,73 @@ for int_id = 1:numel(assembly.interfaces)
 end
 
 K_contact = 0.5 * (K_contact + K_contact');
+end
+
+function u_out = solve_coupled_linear_step(assembly, K_sys, F_sys, K_contact, K_bc_extra, ...
+                                           fixed_dofs, prescribed_vals, free_dofs, opts)
+% Solves one coupled linear step either via direct elimination or GPU/PCG
+total_dof = assembly.total_dof;
+u_out = zeros(total_dof, 1);
+
+if strcmpi(opts.linear_solver, 'gpu_pcg')
+    % GPU / Matrix-free PCG path
+    if ~isempty(fixed_dofs)
+        u_out(fixed_dofs) = prescribed_vals;
+        p_fix = zeros(total_dof, 1);
+        p_fix(fixed_dofs) = prescribed_vals;
+        y_fix = gpu_assembly_matvec(assembly, p_fix, K_contact, K_bc_extra, struct('use_gpu', true));
+        b_free = F_sys(free_dofs) - y_fix(free_dofs);
+    else
+        b_free = F_sys(free_dofs);
+    end
+    
+    % Diagonal Jacobi preconditioner
+    diag_K = full(diag(K_sys));
+    diag_K(abs(diag_K) < 1e-12) = 1.0;
+    inv_diag = 1.0 ./ diag_K(free_dofs);
+    
+    % PCG iteration
+    p_full = zeros(total_dof, 1);
+    x_free = zeros(numel(free_dofs), 1);
+    r = b_free;
+    z = inv_diag .* r;
+    p = z;
+    rz_old = dot(r, z);
+    
+    tol = opts.pcg_tol;
+    norm_b = norm(b_free);
+    if norm_b == 0, norm_b = 1.0; end
+    
+    for it = 1:opts.pcg_max_iter
+        p_full(free_dofs) = p;
+        Ap_full = gpu_assembly_matvec(assembly, p_full, K_contact, K_bc_extra, struct('use_gpu', true));
+        Ap = Ap_full(free_dofs);
+        
+        alpha = rz_old / max(dot(p, Ap), 1e-16);
+        x_free = x_free + alpha * p;
+        r = r - alpha * Ap;
+        
+        res_norm = norm(r) / norm_b;
+        if res_norm < tol
+            break;
+        end
+        
+        z = inv_diag .* r;
+        rz_new = dot(r, z);
+        beta = rz_new / rz_old;
+        p = z + beta * p;
+        rz_old = rz_new;
+    end
+    u_out(free_dofs) = x_free;
+else
+    % Direct backslash linear solve
+    if ~isempty(fixed_dofs)
+        u_out(fixed_dofs) = prescribed_vals;
+        F_free = F_sys(free_dofs) - K_sys(free_dofs, fixed_dofs) * prescribed_vals;
+        u_out(free_dofs) = K_sys(free_dofs, free_dofs) \ F_free;
+    else
+        u_out = K_sys \ F_sys;
+    end
+end
+
 end
