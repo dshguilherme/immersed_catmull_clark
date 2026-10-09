@@ -6,12 +6,17 @@ authors = ["dshgu"]
 description = "High-performance zero-dependency Immersed Catmull-Clark Isogeometric Analysis & Octree AMR Stack"
 
 [dependencies]
-# Zero external dependencies for pure core algorithms.
-# Standard library only (Vec, HashMap, BTreeMap, etc.)
+wgpu = "22.0"
+pollster = "0.3"
+bytemuck = { version = "1.16", features = ["derive"] }
 
 [[bin]]
 name = "obstacle_course"
 path = "src/bin/obstacle_course.rs"
+
+[[bin]]
+name = "wgpu_matrixfree_benchmark"
+path = "src/bin/wgpu_matrixfree_benchmark.rs"
 
 [profile.release]
 opt-level = 3

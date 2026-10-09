@@ -58,6 +58,17 @@ __pycache__/
 Thumbs.db
 .claude/
 .codex/
+
+# Rust build artifacts
+target/
+**/target/
+*.pdb
+*.exe
+*.dll
+*.lib
+*.a
+*.o
+run_rust.ps1
 # --- Gauntlet (added by `gauntlet init`, FR-4.5) ---
 # Run manifests and transcripts are committable by design (FR-4): they are the
 # audit trail a reviewer reconstructs a run from. Only live bookkeeping and the

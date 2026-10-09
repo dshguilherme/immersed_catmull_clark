@@ -12,18 +12,24 @@ pub fn evaluate_bspline_basis_1d(degree: usize, knots: &[f64], u: &[f64]) -> Vec
 
     // Degree 0 initialization
     let mut n_basis: Vec<Vec<f64>> = vec![vec![0.0; nk - 1]; nu];
+    let last_knot = knots[nk - 1];
     for k in 0..nu {
         let uk = u[k];
         for i in 0..(nk - 1) {
             let left = knots[i];
             let right = knots[i + 1];
-            if i == nk - 2 {
-                // Include right endpoint for closed intervals
-                if uk >= left && uk <= right {
+            if left >= right {
+                continue; // Zero-length knot span
+            }
+            if (uk - last_knot).abs() < 1e-14 {
+                // At right boundary, assign to last non-empty span
+                if (right - last_knot).abs() < 1e-14 {
                     n_basis[k][i] = 1.0;
+                    break;
                 }
             } else if uk >= left && uk < right {
                 n_basis[k][i] = 1.0;
+                break;
             }
         }
     }
