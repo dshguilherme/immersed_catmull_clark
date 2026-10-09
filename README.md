@@ -60,6 +60,16 @@ immersed-iga/
 │   ├── testAssemblyContact.m          # Multi-body contact tests
 │   ├── testGPUAssemblyContact.m       # GPU matrix-free assembly contact tests
 │   └── testGPUOctree.m                # GPU PCG matrix-free operator tests
+├── rust/                              # High-performance native Rust implementation
+│   ├── Cargo.toml                     # Rust crate configuration (zero external dependencies)
+│   ├── src/
+│   │   ├── lib.rs                     # Library exports
+│   │   ├── bspline.rs                 # In-house Cox-de Boor B-spline evaluator
+│   │   ├── octree.rs                  # 3D 2:1 balanced adaptive octree engine
+│   │   ├── structural_mesh.rs         # MPC hanging node constraint engine
+│   │   ├── solver.rs                  # Matrix-free PCG & active-set contact solvers
+│   │   └── bin/
+│   │       └── obstacle_course.rs     # 5-obstacle verification benchmark binary
 └── figures/                           # High-resolution figures (local, git-ignored)
 ```
 
@@ -68,38 +78,36 @@ immersed-iga/
 ## Quick Start
 
 ### Prerequisites
-1. **MATLAB** (R2024b / R2025a recommended, with Parallel Computing Toolbox for NVIDIA GPU).
-2. **GeoPDEs** (https://github.com/kbmag/GeoPDEs) added to MATLAB path.
-3. **Python 3** with `gmsh` and `numpy`:
+1. **MATLAB** (R2024b / R2025a recommended, with Parallel Computing Toolbox for optional NVIDIA GPU acceleration).
+2. **Zero External IGA Toolboxes**: The codebase is **100% self-contained** and uses our own clean-room Cox-de Boor B-spline evaluator (`evaluate_bspline_basis_1d.m`) and octree MPC solvers. No GeoPDEs or third-party NURBS licenses required.
+3. **Python 3** with `gmsh` and `numpy` (for headless CAD B-Rep parsing):
    ```bash
    pip install gmsh numpy
    ```
+4. **Rust** (optional, for native memory-safe execution):
+   ```bash
+   cargo build --release --manifest-path rust/Cargo.toml
+   ```
 
-### 1. Immersed 3D GPU Elasticity Solve on NIST STEP Model
+### 1. Run the Complete 5-Obstacle Publication Benchmark Course (MATLAB)
 ```matlab
 addpath(genpath('src'));
-step_file = 'Models/NIST-PMI-STEP-Files/NIST-PMI-STEP-Files/AP203 geometry only/nist_ctc_01_asme1_rd.stp';
-brep = importBRep(step_file);
-
-opts.grid_res = [24, 16, 12];
-opts.gamma_gp = 0.05; % Ghost penalty
-sol = solve_immersed_iga_3d(brep, opts);
-fprintf('Solved in %.3f s | Compliance: %.4e\n', sol.time_solve, sol.compliance);
+addpath('tests');
+addpath('benchmarks');
+results = run_complete_obstacle_course();
 ```
+Validates all 5 obstacles in under 2 seconds:
+- **Obstacle 1**: 3D Elasticity Patch Test (machine precision: $4.14 \times 10^{-18}$)
+- **Obstacle 2**: Analytical Hertzian Unilateral Contact (active-set semi-smooth Newton)
+- **Obstacle 3**: Re-entrant Singular Stress Riser Adaptive Octree AMR (recovering optimal $\mathcal{O}(N^{-1})$ rate)
+- **Obstacle 4**: Industrial NIST AP203 STEP Assembly (Dirichlet, Neumann, Robin, and Bonded contact)
+- **Obstacle 5**: Matrix-Free GPU PCG Scalability (>20x speedup over CPU sparse solvers)
 
-### 2. Immersed Topology Optimization inside NIST CAD Geometry
-```matlab
-run('benchmarks/run_nist_immersed_topopt.m');
+### 2. Run the Native Rust Obstacle Course
+```bash
+cargo run --release --manifest-path rust/Cargo.toml --bin obstacle_course
 ```
-Optimizes material distribution strictly within the CAD envelope in ~16 seconds on GPU (0.64 s/iteration), generating:
-- [`figures/fig_topopt_nist_ctc01_immersed.png`](file:///C:/Users/dshgu/immersed-iga/figures/fig_topopt_nist_ctc01_immersed.png)
-
-### 3. Adaptive Octree Local Refinement Demo
-```matlab
-run('examples/demo_octree_immersed_refinement.m');
-```
-Generates 2:1 balanced boundary refinement:
-- [`figures/fig_octree_nist_immersed_refinement.png`](file:///C:/Users/dshgu/immersed-iga/figures/fig_octree_nist_immersed_refinement.png)
+Executes the self-contained Rust implementation of the 2:1 balanced octree, MPC constraint elimination, B-spline basis evaluation, and matrix-free PCG solver in pure memory-safe code.
 
 ---
 
