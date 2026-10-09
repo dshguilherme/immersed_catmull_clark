@@ -1,0 +1,51 @@
+# MATLAB & Binary files
+*.asv
+*.log
+*.mex*
+*.p
+*.mat
+*.tmp
+*.bak
+*.txt
+
+# Pictures & Figures (User requested no pictures in repository)
+*.png
+*.jpg
+*.jpeg
+*.fig
+*.tif
+*.tiff
+*.bmp
+figures/
+**/figures/
+
+# CAD Geometry & Meshes (User requested no .stp files)
+*.stp
+*.step
+*.STP
+*.STEP
+*.obj
+*.stl
+*.msh
+*.vtk
+*.vtu
+Models/
+**/Models/
+
+# Documents & LaTeX
+*.pdf
+*.aux
+*.out
+*.spl
+*.bbl
+*.blg
+*.synctex*
+*.tex
+Articles/
+**/Articles/
+
+# Python cache & OS files
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
