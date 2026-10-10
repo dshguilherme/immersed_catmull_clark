@@ -14,9 +14,9 @@
 use eframe::egui::{self, Color32, Pos2, Rect, Stroke, Vec2};
 use immersed_iga::cut_cell::TriangleMesh3D;
 use immersed_iga::cad_model::{CadBody, CadFace, CadAssembly, MaterialProperties, BoundaryConditionType, LabeledBoundaryCondition};
-use immersed_iga::octree::{BoundingBox3D, OctreeMesh3D};
-use immersed_iga::structural_mesh::StructuralMesh3D;
-use immersed_iga::solver::PcgSolver;
+use immersed_iga::iga::eval_vector_at;
+use immersed_iga::immersed::{build_immersed_problem, padded_bounds, solve_immersed_problem, ImmersedOptions, Stabilization};
+use immersed_iga::immersed_bc::surface_boundary_terms;
 use immersed_iga::query::{CadFaceInfo, NamedSelection, QueryAst};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::f64::consts::PI;
@@ -897,7 +897,7 @@ impl CadLabelerApp {
         self.face_centroids = face_centroids;
     }
 
-    /// Direct in-process Matrix-Free PCG Elasticity Solve
+    /// In-process immersed elasticity solve on the labelled faces
     fn solve_in_process(&mut self) {
         let t0 = Instant::now();
         let mut body = CadBody::new(&self.model_name, self.mesh.clone(), self.material.clone());
@@ -939,105 +939,51 @@ impl CadLabelerApp {
         }
         assembly.add_body(body);
 
-        let (center, max_span, _min, _max) = compute_bounds(&self.mesh);
-        let pad = max_span * 0.10;
-        let root_bounds = BoundingBox3D::new(
-            [center[0] - max_span * 0.6 - pad, center[1] - max_span * 0.6 - pad, center[2] - max_span * 0.6 - pad],
-            [center[0] + max_span * 0.6 + pad, center[1] + max_span * 0.6 + pad, center[2] + max_span * 0.6 + pad],
-        );
-        let mut octree = OctreeMesh3D::new(root_bounds, [2, 2, 2]);
-        octree.subdivide_cell(0);
-        octree.balance_2_to_1();
-
-        let struct_mesh = StructuralMesh3D::from_octree(&octree);
-        let total_master_dofs = struct_mesh.n_master * 3;
-
-        let tolerance = 0.15 * max_span;
-        let (fixed_dofs, _vals, f_external) = assembly.resolve_boundary_conditions_on_mesh(&struct_mesh, tolerance);
-
-        let pcg = PcgSolver::new(250, 1e-6);
-        let diag_val = self.material.youngs_modulus * 1.5;
-        let diag_k = vec![diag_val; total_master_dofs];
-
-        let fixed_set: HashSet<usize> = fixed_dofs.iter().cloned().collect();
-        let matvec = |p: &[f64], out: &mut [f64]| {
-            for i in 0..total_master_dofs {
-                if fixed_set.contains(&i) {
-                    out[i] = p[i];
-                } else {
-                    let coupling = if i > 0 { -0.2 * diag_val * p[i - 1] } else { 0.0 }
-                        + if i + 1 < total_master_dofs { -0.2 * diag_val * p[i + 1] } else { 0.0 };
-                    out[i] = diag_val * p[i] + coupling;
-                }
-            }
+        // Immersed elasticity solve (same pipeline as the solve_cad binary): background
+        // B-spline grid, ghost-penalty stabilization, penalty Dirichlet and consistent
+        // tractions on the labelled faces. Runs synchronously; large models take seconds.
+        let gb = padded_bounds(&self.mesh, 0.05);
+        let len: Vec<f64> = (0..3).map(|d| gb[d][1] - gb[d][0]).collect();
+        let lmax = len.iter().cloned().fold(0.0, f64::max);
+        let cells = 20.0;
+        let grid_res = [0, 1, 2].map(|d| ((cells * len[d] / lmax).round() as usize).max(6));
+        let opts = ImmersedOptions {
+            grid_res,
+            young: self.material.youngs_modulus,
+            poisson: self.material.poissons_ratio,
+            stabilization: Stabilization::GhostPenalty { gamma: 1e-2 },
+            clamped_face: None,
+            ..ImmersedOptions::default()
         };
-
-        let (u_sol, iters, res) = pcg.solve(total_master_dofs, &f_external, &diag_k, matvec);
+        let has_dirichlet = assembly.boundary_conditions.iter().any(|bc| matches!(bc.bc_type, BoundaryConditionType::Dirichlet { .. }));
+        if !has_dirichlet {
+            self.solve_summary = Some("Solve aborted: assign at least one Dirichlet (clamp) face.".to_string());
+            return;
+        }
+        let mut pb = build_immersed_problem(&self.mesh, &opts);
+        pb.force.iter_mut().for_each(|f| *f = 0.0);
+        let st = surface_boundary_terms(&pb.sp, &assembly, 0, 1e3);
+        pb.add_surface_terms(&st);
+        let sol = solve_immersed_problem(&pb, 1e-8, 20 * pb.sp.ndof);
         let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-        let max_disp = u_sol.iter().map(|&x| x.abs()).fold(0.0, f64::max);
-        let mut mags = Vec::with_capacity(struct_mesh.n_master);
-        let mut def_nodes = Vec::with_capacity(struct_mesh.n_master);
-
-        for i in 0..struct_mesh.n_master {
-            let ux = u_sol[i * 3 + 0];
-            let uy = u_sol[i * 3 + 1];
-            let uz = u_sol[i * 3 + 2];
-            let m = (ux * ux + uy * uy + uz * uz).sqrt() * 1000.0; // mm
-            mags.push(m);
-
-            let orig = struct_mesh.nodes[struct_mesh.master_node_ids[i]];
-            def_nodes.push([orig[0] + ux, orig[1] + uy, orig[2] + uz]);
-        }
-
-        // Map displacement field to CAD surface vertices for true mesh deformation & heatmaps
-        let mut v_disps = Vec::with_capacity(self.mesh.vertices.len());
-        let mut v_mags = Vec::with_capacity(self.mesh.vertices.len());
-        let mut peak_cad_mag = 0.0_f64;
-
-        for v in &self.mesh.vertices {
-            let mut nearest: Vec<(f64, usize)> = Vec::with_capacity(struct_mesh.n_master);
-            for (m_idx, &node_idx) in struct_mesh.master_node_ids.iter().enumerate() {
-                let n = struct_mesh.nodes[node_idx];
-                let d2 = (v[0] - n[0]).powi(2) + (v[1] - n[1]).powi(2) + (v[2] - n[2]).powi(2);
-                nearest.push((d2, m_idx));
-            }
-            nearest.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-            nearest.truncate(4);
-
-            let mut w_sum = 0.0;
-            let mut u_w = [0.0; 3];
-            for (d2, m_idx) in nearest {
-                let w = 1.0 / (d2.sqrt() + 1e-5);
-                w_sum += w;
-                u_w[0] += w * u_sol[m_idx * 3 + 0];
-                u_w[1] += w * u_sol[m_idx * 3 + 1];
-                u_w[2] += w * u_sol[m_idx * 3 + 2];
-            }
-            if w_sum > 0.0 {
-                u_w[0] /= w_sum;
-                u_w[1] /= w_sum;
-                u_w[2] /= w_sum;
-            }
-            let mag = (u_w[0].powi(2) + u_w[1].powi(2) + u_w[2].powi(2)).sqrt() * 1000.0; // mm
-            if mag > peak_cad_mag {
-                peak_cad_mag = mag;
-            }
-            v_disps.push(u_w);
-            v_mags.push(mag);
-        }
+        let v_disps: Vec<[f64; 3]> = self.mesh.vertices.iter().map(|v| eval_vector_at(&pb.sp, &sol.u, v)).collect();
+        let v_mags: Vec<f64> = v_disps.iter().map(|d| (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()).collect();
+        let peak = v_mags.iter().cloned().fold(0.0, f64::max);
+        let def_nodes: Vec<[f64; 3]> = self.mesh.vertices.iter().zip(&v_disps).map(|(v, d)| [v[0] + d[0], v[1] + d[1], v[2] + d[2]]).collect();
 
         self.cad_vertex_displacements = Some(v_disps);
-        self.cad_vertex_mags = Some(v_mags);
-        self.max_displacement = peak_cad_mag.max(max_disp * 1000.0);
+        self.cad_vertex_mags = Some(v_mags.clone());
+        self.max_displacement = peak;
         self.deformed_nodes = Some(def_nodes);
-        self.displacement_mags = Some(mags);
+        self.displacement_mags = Some(v_mags);
         self.show_deformed = true;
         self.show_contour_heatmap = true;
 
+        let converged = sol.residual < 1e-8;
         self.solve_summary = Some(format!(
-            "PCG Converged: {} iters (Res: {:.2e})\nWall Time: {:.2} ms | DOFs: {}\nPeak Disp: {:.6} mm",
-            iters, res, elapsed_ms, total_master_dofs, max_disp * 1000.0
+            "Immersed IGA solve ({}x{}x{} grid, p = 2): PCG {} in {} iters (res {:.1e})\nWall time: {:.0} ms | DOFs: {}\nPeak displacement: {:.4e} (model length units)",
+            grid_res[0], grid_res[1], grid_res[2], if converged { "converged" } else { "NOT converged" }, sol.iterations, sol.residual, elapsed_ms, pb.sp.ndof, peak
         ));
     }
 }
