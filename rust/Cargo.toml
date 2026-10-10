@@ -37,7 +37,18 @@ path = "src/bin/solve_cad.rs"
 name = "cad_gui"
 path = "src/bin/cad_gui.rs"
 
+[[bin]]
+name = "topopt_cad"
+path = "src/bin/topopt_cad.rs"
+
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
+
+# Optimized but quick to build (no LTO): `cargo test --profile fast`
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
