@@ -227,7 +227,7 @@ impl OctreeFem {
     }
 
     /// First leaf containing `p` (tolerance 1e-5, as in MATLAB), its trilinear shape values.
-    fn locate(&self, p: [f64; 3]) -> Option<(usize, [f64; 8])> {
+    pub fn locate(&self, p: [f64; 3]) -> Option<(usize, [f64; 8])> {
         let e = self.leaf_bounds.iter().position(|b| {
             p[0] >= b[0] - 1e-5 && p[0] <= b[1] + 1e-5 && p[1] >= b[2] - 1e-5 && p[1] <= b[3] + 1e-5 && p[2] >= b[4] - 1e-5 && p[2] <= b[5] + 1e-5
         })?;
@@ -313,6 +313,8 @@ pub struct OctreeBcSystem {
     pub stiffness: CsrMatrix,
     pub force: Vec<f64>,
     pub fixed: Vec<(usize, f64)>,
+    /// Penalty / Robin stiffness added to K_master, as triplets (master DOFs).
+    pub extra: (Vec<usize>, Vec<usize>, Vec<f64>),
 }
 
 /// Applies boundary conditions (MATLAB `apply_boundary_conditions`, one-point facet
@@ -425,7 +427,7 @@ pub fn apply_boundary_conditions(fem: &OctreeFem, brep: &TriangleMesh3D, bcs: &[
     fixed.sort_unstable_by_key(|x| x.0);
     fixed.dedup_by_key(|x| x.0);
     let stiffness = if vv.is_empty() { fem.k_master.clone() } else { fem.k_master.plus_triplets(&rr, &cc, &vv) };
-    OctreeBcSystem { stiffness, force, fixed }
+    OctreeBcSystem { stiffness, force, fixed, extra: (rr, cc, vv) }
 }
 
 /// Jacobi-PCG solve with strong elimination of the fixed DOFs. Returns (u, iterations, residual).
