@@ -100,16 +100,12 @@ impl OctreeMesh3D {
         let p_min = parent_bounds.min;
         let p_max = parent_bounds.max;
 
-        let child_bounds = [
-            BoundingBox3D::new([p_min[0], p_min[1], p_min[2]], [c[0], c[1], c[2]]),
-            BoundingBox3D::new([c[0], p_min[1], p_min[2]], [p_max[0], c[1], c[2]]),
-            BoundingBox3D::new([c[0], c[1], p_min[2]], [p_max[0], p_max[1], c[2]]),
-            BoundingBox3D::new([p_min[0], c[1], p_min[2]], [c[0], p_max[1], c[2]]),
-            BoundingBox3D::new([p_min[0], p_min[1], c[2]], [c[0], c[1], p_max[2]]),
-            BoundingBox3D::new([c[0], p_min[1], c[2]], [p_max[0], c[1], p_max[2]]),
-            BoundingBox3D::new([c[0], c[1], c[2]], [p_max[0], p_max[1], p_max[2]]),
-            BoundingBox3D::new([p_min[0], c[1], c[2]], [c[0], p_max[1], p_max[2]]),
-        ];
+        // Children in lexicographic order, x fastest (same as the MATLAB reference).
+        let span = |d: usize, k: usize| if k == 0 { (p_min[d], c[d]) } else { (c[d], p_max[d]) };
+        let child_bounds: [BoundingBox3D; 8] = std::array::from_fn(|i| {
+            let (x, y, z) = (span(0, i & 1), span(1, (i >> 1) & 1), span(2, (i >> 2) & 1));
+            BoundingBox3D::new([x.0, y.0, z.0], [x.1, y.1, z.1])
+        });
 
         let start_idx = self.cells.len();
         let mut child_indices = [0; 8];
@@ -137,6 +133,32 @@ impl OctreeMesh3D {
             .enumerate()
             .filter_map(|(idx, cell)| if cell.is_leaf { Some(idx) } else { None })
             .collect()
+    }
+
+    /// Builds a root grid and refines, level by level up to `max_level`, the leaves for
+    /// which `refine` returns true; then balances (MATLAB `octree_mesh_3d`).
+    pub fn build<F: Fn(&BoundingBox3D) -> bool>(bounds: BoundingBox3D, grid_res: [usize; 3], max_level: usize, refine: F) -> Self {
+        let mut oct = Self::new(bounds, grid_res);
+        for lvl in 0..max_level {
+            let current: Vec<usize> = (0..oct.cells.len()).filter(|&i| oct.cells[i].is_leaf && oct.cells[i].level == lvl).collect();
+            for idx in current {
+                if refine(&oct.cells[idx].bounds) {
+                    oct.subdivide_cell(idx);
+                }
+            }
+        }
+        oct.balance_2_to_1();
+        oct
+    }
+
+    /// Subdivides the leaves at the given positions in `leaf_indices()` order, then
+    /// balances (MATLAB `subdivide_octree_leaves`).
+    pub fn subdivide_leaves(&mut self, leaf_positions: &[usize]) {
+        let leaves = self.leaf_indices();
+        for &pos in leaf_positions {
+            self.subdivide_cell(leaves[pos]);
+        }
+        self.balance_2_to_1();
     }
 
     /// Enforces strict 2:1 balancing across all adjacent leaves.

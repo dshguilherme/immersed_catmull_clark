@@ -16,6 +16,7 @@ pub mod immersed;
 pub mod immersed_bc;
 pub mod topopt_iga;
 pub mod verification;
+pub mod octree_fem;
 
 pub use bspline::{evaluate_bspline_basis_1d, open_knot_vector};
 pub use octree::{BoundingBox3D, OctreeCell, OctreeMesh3D};
