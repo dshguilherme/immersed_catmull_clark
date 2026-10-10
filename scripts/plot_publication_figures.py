@@ -34,6 +34,19 @@ plt.rcParams.update({
 FIG_DIR = os.path.join(os.path.dirname(__file__), "..", "figures")
 os.makedirs(FIG_DIR, exist_ok=True)
 
+# Okabe-Ito Colorblind-Safe Palette
+OKABE_ITO = {
+    'black': '#000000',
+    'orange': '#E69F00',
+    'sky_blue': '#56B4E9',
+    'bluish_green': '#009E73',
+    'yellow': '#F0E442',
+    'blue': '#0072B2',
+    'vermilion': '#D55E00',
+    'reddish_purple': '#CC79A7',
+    'gray': '#999999',
+}
+
 def plot_benchmark_scaling():
     """Generates Figure 1: Multi-backend MatVec Wall-Clock & Throughput Scaling."""
     print("[1/3] Generating Figure 1: Matrix-Free Scalability & GFLOP/s...")
@@ -56,13 +69,13 @@ def plot_benchmark_scaling():
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.5))
 
-    # Panel A: Wall-Clock Execution Time (Log-Log)
-    ax1.loglog(dofs, matlab_cpu, 'o--', color='#7f7f7f', label='MATLAB CPU (Sparse BLAS)', linewidth=1.5, markersize=5)
-    ax1.loglog(dofs, rust_cpu_1t, 's--', color='#d62728', label='Rust CPU (Single-Thread)', linewidth=1.5, markersize=5)
-    ax1.loglog(dofs, rust_cpu_rayon, '^-.', color='#e377c2', label='Rust CPU (Rayon Multi-Thread)', linewidth=1.5, markersize=5)
-    ax1.loglog(dofs, matlab_gpu, 'd-', color='#ff7f0e', label='MATLAB GPU (cuBLAS GEMM)', linewidth=1.8, markersize=6)
-    ax1.loglog(dofs, rust_wgpu, 'v-', color='#1f77b4', label='Rust WGPU (DX12 Compute)', linewidth=1.8, markersize=6)
-    ax1.loglog(dofs, rust_cuda, '*-', color='#2ca02c', label='Rust Native CUDA (Warp-Coalesced)', linewidth=2.2, markersize=8)
+    # Panel A: Wall-Clock Execution Time (Log-Log) with Okabe-Ito colors
+    ax1.loglog(dofs, matlab_cpu, 'o--', color=OKABE_ITO['gray'], label='MATLAB CPU (Sparse BLAS)', linewidth=1.5, markersize=5)
+    ax1.loglog(dofs, rust_cpu_1t, 's--', color=OKABE_ITO['vermilion'], label='Rust CPU (Single-Thread)', linewidth=1.5, markersize=5)
+    ax1.loglog(dofs, rust_cpu_rayon, '^-.', color=OKABE_ITO['reddish_purple'], label='Rust CPU (Rayon Multi-Thread)', linewidth=1.5, markersize=5)
+    ax1.loglog(dofs, matlab_gpu, 'd-', color=OKABE_ITO['orange'], label='MATLAB GPU (cuBLAS GEMM)', linewidth=1.8, markersize=6)
+    ax1.loglog(dofs, rust_wgpu, 'v-', color=OKABE_ITO['sky_blue'], label='Rust WGPU (DX12 Compute)', linewidth=1.8, markersize=6)
+    ax1.loglog(dofs, rust_cuda, '*-', color=OKABE_ITO['bluish_green'], label='Rust Native CUDA (Warp-Coalesced)', linewidth=2.2, markersize=8)
 
     ax1.set_xlabel('Total Active DOFs ($N_{\\mathrm{dof}}$)')
     ax1.set_ylabel('Execution Time per MatVec [ms]')
@@ -71,13 +84,13 @@ def plot_benchmark_scaling():
     ax1.set_xticks(dofs)
     ax1.get_xaxis().set_major_formatter(ScalarFormatter())
 
-    # Panel B: Sustained GPU Throughput [GFLOP/s]
+    # Panel B: Sustained GPU Throughput [GFLOP/s] with Okabe-Ito colors
     x_indices = np.arange(len(elements))
     width = 0.25
 
-    ax2.bar(x_indices - width, matlab_gpu_gflops, width, label='MATLAB GPU (cuBLAS)', color='#ff7f0e', alpha=0.85, edgecolor='black', linewidth=0.5)
-    ax2.bar(x_indices, wgpu_gflops, width, label='Rust WGPU (DX12)', color='#1f77b4', alpha=0.85, edgecolor='black', linewidth=0.5)
-    ax2.bar(x_indices + width, cuda_gflops, width, label='Rust CUDA (Warp-Coalesced)', color='#2ca02c', alpha=0.85, edgecolor='black', linewidth=0.5)
+    ax2.bar(x_indices - width, matlab_gpu_gflops, width, label='MATLAB GPU (cuBLAS)', color=OKABE_ITO['orange'], alpha=0.9, edgecolor='black', linewidth=0.5)
+    ax2.bar(x_indices, wgpu_gflops, width, label='Rust WGPU (DX12)', color=OKABE_ITO['sky_blue'], alpha=0.9, edgecolor='black', linewidth=0.5)
+    ax2.bar(x_indices + width, cuda_gflops, width, label='Rust CUDA (Warp-Coalesced)', color=OKABE_ITO['bluish_green'], alpha=0.9, edgecolor='black', linewidth=0.5)
 
     ax2.set_xlabel('Problem Size [Active Hex Elements $N_e$]')
     ax2.set_ylabel('Sustained GPU Throughput [GFLOP/s]')
@@ -91,7 +104,7 @@ def plot_benchmark_scaling():
                  xy=(x_indices[-1] + width, cuda_gflops[-1]),
                  xytext=(x_indices[-1] - 0.2, cuda_gflops[-1] + 15),
                  arrowprops=dict(facecolor='black', arrowstyle='->', lw=1.0),
-                 fontsize=8.5, fontweight='bold', bbox=dict(boxstyle='round,pad=0.3', fc='yellow', alpha=0.3))
+                 fontsize=8.5, fontweight='bold', bbox=dict(boxstyle='round,pad=0.3', fc=OKABE_ITO['yellow'], alpha=0.4))
 
     plt.tight_layout()
     out_path = os.path.join(FIG_DIR, "fig_matrixfree_gpu_benchmark.png")
@@ -116,12 +129,12 @@ def plot_speedup_scorecard():
     speedups = [m / r for m, r in zip(matlab_times, rust_times)]
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    bars = ax.barh(categories, speedups, color=['#1f77b4', '#2ca02c', '#ff7f0e', '#d62728'], alpha=0.85, edgecolor='black', linewidth=0.6)
+    bars = ax.barh(categories, speedups, color=[OKABE_ITO['blue'], OKABE_ITO['bluish_green'], OKABE_ITO['orange'], OKABE_ITO['vermilion']], alpha=0.9, edgecolor='black', linewidth=0.6)
 
     ax.set_xscale('log')
     ax.set_xlabel('Rust Speedup Factor vs. MATLAB Baseline (Log Scale)')
     ax.set_title('Rust Architecture Speedup Factor Across Core Modules', fontweight='bold')
-    ax.axvline(1.0, color='red', linestyle='--', linewidth=1.2, alpha=0.7, label='1.0x (Parity)')
+    ax.axvline(1.0, color=OKABE_ITO['vermilion'], linestyle='--', linewidth=1.2, alpha=0.8, label='1.0x (Parity)')
 
     for bar, sp in zip(bars, speedups):
         val_str = f"{sp:.2f}x" if sp < 10 else f"{sp:,.0f}x"
@@ -164,7 +177,7 @@ def plot_topopt_results():
     # Panel A: Convergence of Compliance
     ax1 = fig.add_subplot(1, 2, 1)
     iters = np.arange(1, len(compliance) + 1)
-    ax1.plot(iters, compliance, 'o-', color='#1f77b4', linewidth=1.8, markersize=5)
+    ax1.plot(iters, compliance, 'o-', color=OKABE_ITO['blue'], linewidth=1.8, markersize=5)
     ax1.set_xlabel('Topology Optimization Iteration')
     ax1.set_ylabel(r'Objective Compliance $c(\mathbf{\rho}) = \mathbf{u}^T \mathbf{K} \mathbf{u}$')
     ax1.set_title('(a) Convergence History (Solved in 390 ms)', fontweight='bold')
