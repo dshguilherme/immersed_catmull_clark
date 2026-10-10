@@ -113,6 +113,67 @@ impl CsrMatrix {
     }
 }
 
+/// Precomputed CSR pattern for repeated assembly of element matrices with the same
+/// connectivity (e.g. one assembly per optimization iteration).
+pub struct AssemblyPattern {
+    ndof: usize,
+    nsh: usize,
+    indptr: Vec<usize>,
+    indices: Vec<usize>,
+    /// `pos[(e * nsh + a) * nsh + b]` = position of entry (conn[e,a], conn[e,b]) in `data`.
+    pos: Vec<usize>,
+}
+
+impl AssemblyPattern {
+    pub fn new(ndof: usize, conn: &[usize], nsh: usize, nel: usize) -> Self {
+        // row -> sorted unique columns
+        let mut rows: Vec<Vec<usize>> = vec![Vec::new(); ndof];
+        for e in 0..nel {
+            let ce = &conn[e * nsh..(e + 1) * nsh];
+            for &a in ce {
+                rows[a].extend_from_slice(ce);
+            }
+        }
+        let mut indptr = vec![0usize; ndof + 1];
+        let mut indices = Vec::new();
+        for r in 0..ndof {
+            let row = &mut rows[r];
+            row.sort_unstable();
+            row.dedup();
+            indices.extend_from_slice(row);
+            indptr[r + 1] = indices.len();
+        }
+        let mut pos = Vec::with_capacity(nel * nsh * nsh);
+        for e in 0..nel {
+            let ce = &conn[e * nsh..(e + 1) * nsh];
+            for &a in ce {
+                let row = &indices[indptr[a]..indptr[a + 1]];
+                for &b in ce {
+                    pos.push(indptr[a] + row.binary_search(&b).expect("pattern entry"));
+                }
+            }
+        }
+        Self { ndof, nsh, indptr, indices, pos }
+    }
+
+    /// `sum_e scale[e] * K_e` with `elem(e)` the row-major element matrix.
+    pub fn assemble<'a, F>(&self, elem: F, scale: &[f64]) -> CsrMatrix
+    where
+        F: Fn(usize) -> &'a [f64],
+    {
+        let nn = self.nsh * self.nsh;
+        let mut data = vec![0.0; self.indices.len()];
+        for (e, &s) in scale.iter().enumerate() {
+            let ke = elem(e);
+            let p = &self.pos[e * nn..(e + 1) * nn];
+            for k in 0..nn {
+                data[p[k]] += s * ke[k];
+            }
+        }
+        CsrMatrix { nrows: self.ndof, ncols: self.ndof, indptr: self.indptr.clone(), indices: self.indices.clone(), data }
+    }
+}
+
 /// Assembles `sum_e scale[e] * K_e` into a CSR matrix, where `elem(e)` returns the
 /// row-major `[nsh x nsh]` element matrix with local ordering `conn[e*nsh..]`.
 pub fn assemble<'a, F>(ndof: usize, conn: &[usize], nsh: usize, nel: usize, elem: F, scale: Option<&[f64]>) -> CsrMatrix
