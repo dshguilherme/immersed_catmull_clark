@@ -1,4 +1,4 @@
-function [K, t_breakdown] = fast_stiffness_assembly(space, YOUNG, POISSON, xPhys, density_type, penal, Emin, symmetrize, sp_rho)
+function [K, t_breakdown] = fast_stiffness_assembly(space, YOUNG, POISSON, xPhys, density_type, penal, Emin, symmetrize, sp_rho, layout)
 % FAST_STIFFNESS_ASSEMBLY High-Performance IGA Stiffness Formation
 % Supports both:
 %   - 'element' : Piecewise-constant element density xPhys (size [nel_x, nel_y])
@@ -15,6 +15,7 @@ function [K, t_breakdown] = fast_stiffness_assembly(space, YOUNG, POISSON, xPhys
 %   symmetrize   - Boolean flag to enforce self-adjoint symmetry (default: true)
 %   sp_rho       - (Optional) space for the density field if type='spline'
 %                  (default: the displacement space; see IGA_SPACE_BOX)
+%   layout       - WQ point layout: 'interior' (default) or 'calabro' (see IGA_WQ_RULES_1D)
 
 if nargin < 4 || isempty(xPhys), xPhys = []; end
 if nargin < 5 || isempty(density_type), density_type = 'element'; end
@@ -22,6 +23,7 @@ if nargin < 6 || isempty(penal), penal = 3; end
 if nargin < 7 || isempty(Emin), Emin = 1e-9; end
 if nargin < 8 || isempty(symmetrize), symmetrize = true; end
 if nargin < 9 || isempty(sp_rho), sp_rho = space; end
+if nargin < 10 || isempty(layout), layout = 'interior'; end
 
 t_start = tic;
 nsd = space.dim;
@@ -29,7 +31,7 @@ nsd = space.dim;
 %% 1. 1D Setup
 t_prep = tic;
 for idim = 1:nsd
-    Quad_rules(idim) = iga_wq_rules_1d(space.knots{idim}, space.degree(idim));
+    Quad_rules(idim) = iga_wq_rules_1d(space.knots{idim}, space.degree(idim), layout);
     Connectivity(idim).neighbors = Quad_rules(idim).neighbors;
     Connectivity(idim).num_neigh = cellfun(@numel, Connectivity(idim).neighbors);
     qn{idim} = Quad_rules(idim).all_points';

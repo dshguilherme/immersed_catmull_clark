@@ -18,7 +18,9 @@ sp3 = iga_space_box([0 1.2; 0 0.6; 0 0.3], [4 3 2], 2);
 Kfe = fast_stiffness_assembly(sp, 1.0, 0.3, xe, 'element', 3, 1e-3, true);
 Kfs = fast_stiffness_assembly(sp, 1.0, 0.3, xs, 'spline', 3, 1e-3, true);
 Kf3 = fast_stiffness_assembly(sp3, 1.0, 0.3, xe3, 'element', 3, 1e-3, true);
-Q = iga_wq_rules_1d(sp.knots{1}, p);
+Q = iga_wq_rules_1d(sp.knots{1}, p);            % interior layout (default)
+Qc = iga_wq_rules_1d(sp.knots{1}, p, 'calabro');
+Kfe_cal = fast_stiffness_assembly(sp, 1.0, 0.3, xe, 'element', 3, 1e-3, true, sp, 'calabro');
 probe = @(K) (K * sin(0.37 * (1:size(K, 1)).')).';
 data.nel = [nelx nely]; data.degree = p; data.xe = xe(:).'; data.xs = xs(:).'; data.U = U.'; data.xe3 = xe3(:).';
 data.Kfe_probe = probe(Kfe); data.Kfs_probe = probe(Kfs); data.Kf3_probe = probe(Kf3);
@@ -27,6 +29,9 @@ data.dCe = reshape(fast_sensitivities(U, sp, xe, 'element', 3, 1e-3, 1.0, 0.3), 
 data.dCs = reshape(fast_sensitivities(U, sp, xs, 'spline', 3, 1e-3, 1.0, 0.3), 1, []);
 data.wq_points = Q.all_points;
 data.wq_w11_first = Q.quad_weights_11{1}; data.wq_w10_mid = Q.quad_weights_10{5};
+data.wqc_points = Qc.all_points;
+data.wqc_w11_first = Qc.quad_weights_11{1}; data.wqc_w10_mid = Qc.quad_weights_10{5};
+data.Kfe_cal_probe = probe(Kfe_cal);
 old = cd(tempdir); c = onCleanup(@() cd(old));
 [x2e, c2e] = topopt_iga_fast(16, 8, 0.5, 3, 2, 5, 'element', 3);
 [x2s, c2s] = topopt_iga_fast(16, 8, 0.5, 3, 2, 5, 'spline', 3);

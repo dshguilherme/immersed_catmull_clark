@@ -4,7 +4,7 @@ use immersed_iga::cad_model::{parse_json, JsonValue};
 use immersed_iga::iga::{elasticity_element_matrices, lame, SpaceBox};
 use immersed_iga::sparse::{assemble, CsrMatrix};
 use immersed_iga::topopt2d::{fast_sensitivities, topopt_iga_fast};
-use immersed_iga::wq::{wq_rules_1d, wq_stiffness, Density};
+use immersed_iga::wq::{wq_rules_1d, wq_rules_1d_layout, wq_stiffness, wq_stiffness_layout, Density, WqLayout};
 
 fn nums(v: &JsonValue) -> Vec<f64> {
     match v {
@@ -34,12 +34,29 @@ fn gauss(sp: &SpaceBox) -> CsrMatrix {
 
 #[test]
 fn wq_equals_gauss_for_uniform_density() {
-    for (b, n, p) in [(vec![[0.0, 1.0], [0.0, 0.5]], vec![6, 4], 3usize), (vec![[0.0, 1.2], [0.0, 0.6], [0.0, 0.3]], vec![4, 3, 2], 2usize)] {
+    let cases = [
+        (vec![[0.0, 1.0], [0.0, 0.5]], vec![6, 4], 3usize),
+        (vec![[0.0, 1.0], [0.0, 0.5]], vec![7, 3], 5usize),
+        (vec![[0.0, 1.2], [0.0, 0.6], [0.0, 0.3]], vec![4, 3, 2], 2usize),
+    ];
+    for (b, n, p) in cases {
         let sp = SpaceBox::new(&b, &n, p);
-        let kw = wq_stiffness(&sp, 1.0, 0.3, Density::None, 3.0, 1e-3);
         let kg = gauss(&sp);
-        let e = rel(&probe(&kw), &probe(&kg));
-        assert!(e < 1e-12, "WQ vs Gauss (dim {}): {:e}", sp.dim, e);
+        for layout in [WqLayout::Interior, WqLayout::Calabro] {
+            let kw = wq_stiffness_layout(&sp, 1.0, 0.3, Density::None, 3.0, 1e-3, layout);
+            let e = rel(&probe(&kw), &probe(&kg));
+            assert!(e < 1e-12, "WQ ({:?}) vs Gauss (dim {}, p {}): {:e}", layout, sp.dim, p, e);
+        }
+    }
+}
+
+#[test]
+fn interior_layout_has_no_interface_points() {
+    for p in 1..=6 {
+        let sp = SpaceBox::new(&[[0.0, 1.0], [0.0, 0.5]], &[9, 2], p);
+        let q = wq_rules_1d(&sp.univ[0].knots, p);
+        let br = &sp.univ[0].breaks;
+        assert!(q.points.iter().all(|x| br.iter().all(|b| (x - b).abs() > 1e-12)), "p {}: point on a breakpoint", p);
     }
 }
 
@@ -56,6 +73,12 @@ fn fastformation_matches_matlab_reference() {
     assert!(rel(&q.points, &g("wq_points")) < 1e-15);
     assert!(rel(&q.weights[3][0], &g("wq_w11_first")) < 1e-11);
     assert!(rel(&q.weights[1][4], &g("wq_w10_mid")) < 1e-11);
+    let qc = wq_rules_1d_layout(&sp.univ[0].knots, p, WqLayout::Calabro);
+    assert!(rel(&qc.points, &g("wqc_points")) < 1e-15);
+    assert!(rel(&qc.weights[3][0], &g("wqc_w11_first")) < 1e-11);
+    assert!(rel(&qc.weights[1][4], &g("wqc_w10_mid")) < 1e-11);
+    let kc = wq_stiffness_layout(&sp, 1.0, 0.3, Density::Element(&g("xe")), 3.0, 1e-3, WqLayout::Calabro);
+    assert!(rel(&probe(&kc), &g("Kfe_cal_probe")) < 1e-12, "element-density WQ, Calabro layout");
 
     let (xe, xs) = (g("xe"), g("xs"));
     let ke = wq_stiffness(&sp, 1.0, 0.3, Density::Element(&xe), 3.0, 1e-3);

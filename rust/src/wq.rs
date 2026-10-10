@@ -1,7 +1,8 @@
 //! Weighted-quadrature (WQ) stiffness formation with sum factorization, the
 //! "FastFormation" kernel: a port of `src/iga/iga_wq_rules_1d.m`,
 //! `iga_wq_elasticity_tensor.m` and the row loop of `src/fastformation/fast_stiffness_assembly.m`
-//! (Calabro, Sangalli & Tani, CMAME 316, 2017). Validated in `rust/tests/wq_vs_matlab.rs`;
+//! (Calabro, Sangalli & Tani, CMAME 316, 2017), with the interior point layout of the
+//! FastFormation paper as the default (`WqLayout`). Validated in `rust/tests/wq_vs_matlab.rs`;
 //! for uniform density it reproduces exact Gauss assembly.
 
 use crate::iga::{basis_dense, SpaceBox, Space1d};
@@ -62,8 +63,183 @@ fn min_norm(a: &[f64], m: usize, n: usize, rhs: &[f64]) -> Vec<f64> {
     (0..n).map(|k| (0..m).map(|i| a[i * n + k] * y[i]).sum()).collect()
 }
 
-/// Builds the four WQ rules for a uniform open knot vector of degree `p >= 1`.
+/// Minimum-norm solution of A w = rhs with A [m x n] (row-major, full row rank, m <= n),
+/// by Householder QR of A^T (no normal equations, so no squared condition number).
+fn min_norm_qr(a: &[f64], m: usize, n: usize, rhs: &[f64]) -> Vec<f64> {
+    // q = A^T as column-major n x m, reduced in place to R; Householder vectors in `vs`
+    let mut r: Vec<f64> = vec![0.0; n * m];
+    for i in 0..m {
+        for k in 0..n {
+            r[i * n + k] = a[i * n + k]; // column i of A^T = row i of A
+        }
+    }
+    let mut vs: Vec<Vec<f64>> = Vec::with_capacity(m);
+    for j in 0..m {
+        let col = &r[j * n..(j + 1) * n];
+        let norm = col[j..].iter().map(|x| x * x).sum::<f64>().sqrt();
+        let mut v = vec![0.0; n];
+        v[j..].copy_from_slice(&col[j..]);
+        let alpha = if col[j] >= 0.0 { -norm } else { norm };
+        v[j] -= alpha;
+        let vn = v[j..].iter().map(|x| x * x).sum::<f64>();
+        if vn > 0.0 {
+            for c in j..m {
+                let cc = &mut r[c * n..(c + 1) * n];
+                let s: f64 = (j..n).map(|k| v[k] * cc[k]).sum::<f64>() * 2.0 / vn;
+                for k in j..n {
+                    cc[k] -= s * v[k];
+                }
+            }
+        }
+        vs.push(v);
+    }
+    // R^T y = rhs (R upper triangular m x m, R[i][c] = r[c*n + i])
+    let mut y = vec![0.0; n];
+    for i in 0..m {
+        let s: f64 = (0..i).map(|c| r[i * n + c] * y[c]).sum();
+        y[i] = (rhs[i] - s) / r[i * n + i];
+    }
+    // w = Q y = H_0 H_1 ... H_{m-1} y
+    for j in (0..m).rev() {
+        let v = &vs[j];
+        let vn = v[j..].iter().map(|x| x * x).sum::<f64>();
+        if vn > 0.0 {
+            let s: f64 = (j..n).map(|k| v[k] * y[k]).sum::<f64>() * 2.0 / vn;
+            for k in j..n {
+                y[k] -= s * v[k];
+            }
+        }
+    }
+    y
+}
+
+/// Point layout of the univariate WQ rules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WqLayout {
+    /// FastFormation paper: points strictly inside the elements (3 per element,
+    /// max(3, p+1) in the end elements), weighted minimum-norm W0, W1 by the
+    /// derivative recurrence, exactness on S_p^{p-2}; W01 = W00 and W11 = W10.
+    Interior,
+    /// Calabro, Sangalli & Tani (2017): p+2 points in the end elements, knots and
+    /// midpoints inside (points on element interfaces), four unweighted rules.
+    Calabro,
+}
+
+/// Builds the WQ rules (interior layout) for a uniform open knot vector of degree `p >= 1`.
 pub fn wq_rules_1d(knots: &[f64], p: usize) -> WqRules1d {
+    wq_rules_1d_layout(knots, p, WqLayout::Interior)
+}
+
+/// Builds the WQ rules with the given point layout (port of `iga_wq_rules_1d.m`).
+pub fn wq_rules_1d_layout(knots: &[f64], p: usize, layout: WqLayout) -> WqRules1d {
+    match layout {
+        WqLayout::Interior => rules_interior(knots, p),
+        WqLayout::Calabro => rules_calabro(knots, p),
+    }
+}
+
+fn rules_interior(knots: &[f64], p: usize) -> WqRules1d {
+    assert!(p >= 1);
+    let mut brk: Vec<f64> = Vec::new();
+    for &k in knots {
+        if brk.last().map_or(true, |&b| b != k) {
+            brk.push(k);
+        }
+    }
+    let nel = brk.len() - 1;
+    let mut pts = Vec::new();
+    let mut el = Vec::new();
+    for k in 0..nel {
+        let q = if k == 0 || k == nel - 1 { 3.max(p + 1) } else { 3 };
+        let h = brk[k + 1] - brk[k];
+        for m in 1..=q {
+            pts.push(brk[k] + (2 * m - 1) as f64 / (2 * q) as f64 * h);
+            el.push(k);
+        }
+    }
+    let npt = pts.len();
+    let hq: Vec<f64> = el.iter().map(|&k| brk[k + 1] - brk[k]).collect();
+    let ndof = knots.len() - p - 1;
+    let (b, db) = basis_dense(knots, p, &pts);
+    let sp = Space1d::new(knots.to_vec(), p, p + 1);
+    // Trial space T = S_p^{p-2}: interior breakpoints repeated twice
+    let mut kt: Vec<f64> = vec![brk[0]; p + 1];
+    for &x in &brk[1..nel] {
+        kt.push(x);
+        kt.push(x);
+    }
+    kt.extend(std::iter::repeat(brk[nel]).take(p + 1));
+    let nt = kt.len() - p - 1;
+    let (bt, _) = basis_dense(&kt, p, &pts);
+    let (bm, _) = basis_dense(knots, p - 1, &pts); // degree p-1 functions on the same knots
+    let nm = knots.len() - p;
+
+    let mut ind_points = Vec::with_capacity(ndof);
+    let mut neighbors = Vec::with_capacity(ndof);
+    let mut w: [Vec<Vec<f64>>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    for i in 0..ndof {
+        let els = &sp.supp[i];
+        let ind: Vec<usize> = (0..npt).filter(|&q| els.contains(&el[q])).collect();
+        let mut nb_p: Vec<usize> = els.iter().flat_map(|&e| sp.connectivity[e * (p + 1)..(e + 1) * (p + 1)].iter().copied()).collect();
+        nb_p.sort_unstable();
+        nb_p.dedup();
+        let xg: Vec<f64> = els.iter().flat_map(|&e| sp.qn[e * sp.nquad..(e + 1) * sp.nquad].iter().copied()).collect();
+        let wg: Vec<f64> = els.iter().flat_map(|&e| sp.qw[e * sp.nquad..(e + 1) * sp.nquad].iter().copied()).collect();
+        let (tg, _) = basis_dense(&kt, p, &xg);
+        // Weighted min-norm rule on `ind` for a test function given by its values at
+        // the points (`mvals`) and at the Gauss points (`mg`), exact on T.
+        let rule = |mvals: &dyn Fn(usize) -> f64, mg: &dyn Fn(usize) -> f64| -> Vec<f64> {
+            let z: Vec<f64> = ind.iter().map(|&q| mvals(q) * hq[q]).collect();
+            let act: Vec<usize> = (0..ind.len()).filter(|&c| z[c] > 0.0).collect();
+            let mut out = vec![0.0; ind.len()];
+            if act.is_empty() {
+                return out;
+            }
+            let trial: Vec<usize> = (0..nt).filter(|&j| act.iter().any(|&c| bt[ind[c] * nt + j] != 0.0)).collect();
+            let (m, n) = (trial.len(), act.len());
+            let mut a = vec![0.0; m * n];
+            for (r, &j) in trial.iter().enumerate() {
+                for (c, &ac) in act.iter().enumerate() {
+                    a[r * n + c] = bt[ind[ac] * nt + j] * z[ac];
+                }
+            }
+            let rhs: Vec<f64> = trial.iter().map(|&j| (0..xg.len()).map(|g| tg[g * nt + j] * wg[g] * mg(g)).sum()).collect();
+            let v = min_norm_qr(&a, m, n, &rhs);
+            for (c, &ac) in act.iter().enumerate() {
+                out[ac] = z[ac] * v[c];
+            }
+            out
+        };
+        let (bg, _) = basis_dense(knots, p, &xg);
+        let (bmg, _) = basis_dense(knots, p - 1, &xg);
+        let w0 = rule(&|q| b[q * ndof + i], &|g| bg[g * ndof + i]);
+        // W1 by the recurrence B_i' = p/da N_{i,p-1} - p/db N_{i+1,p-1}
+        let da = knots[i + p] - knots[i];
+        let dbk = knots[i + p + 1] - knots[i + 1];
+        let mut w1 = vec![0.0; ind.len()];
+        if da > 0.0 {
+            let r = rule(&|q| bm[q * nm + i], &|g| bmg[g * nm + i]);
+            for c in 0..w1.len() {
+                w1[c] += p as f64 / da * r[c];
+            }
+        }
+        if dbk > 0.0 {
+            let r = rule(&|q| bm[q * nm + i + 1], &|g| bmg[g * nm + i + 1]);
+            for c in 0..w1.len() {
+                w1[c] -= p as f64 / dbk * r[c];
+            }
+        }
+        w[0].push(w0.clone());
+        w[1].push(w1.clone());
+        w[2].push(w0);
+        w[3].push(w1);
+        ind_points.push(ind);
+        neighbors.push(nb_p);
+    }
+    WqRules1d { points: pts, ndof, ind_points, neighbors, weights: w, b, db }
+}
+
+fn rules_calabro(knots: &[f64], p: usize) -> WqRules1d {
     assert!(p >= 1);
     let mut brk: Vec<f64> = Vec::new();
     for &k in knots {
@@ -146,8 +322,13 @@ pub enum Density<'a> {
 /// WQ elasticity stiffness (component-blocked, symmetrized) with SIMP factor
 /// `emin + rho^penal (1 - emin)` evaluated at the WQ points.
 pub fn wq_stiffness(sp: &SpaceBox, young: f64, poisson: f64, density: Density, penal: f64, emin: f64) -> CsrMatrix {
+    wq_stiffness_layout(sp, young, poisson, density, penal, emin, WqLayout::Interior)
+}
+
+/// [`wq_stiffness`] with an explicit WQ point layout.
+pub fn wq_stiffness_layout(sp: &SpaceBox, young: f64, poisson: f64, density: Density, penal: f64, emin: f64, layout: WqLayout) -> CsrMatrix {
     let dim = sp.dim;
-    let rules: Vec<WqRules1d> = (0..dim).map(|d| wq_rules_1d(&sp.univ[d].knots, sp.degree[d])).collect();
+    let rules: Vec<WqRules1d> = (0..dim).map(|d| wq_rules_1d_layout(&sp.univ[d].knots, sp.degree[d], layout)).collect();
     let npts: Vec<usize> = rules.iter().map(|r| r.points.len()).collect();
     let ntot: usize = npts.iter().product();
 

@@ -1,4 +1,4 @@
-function [K, t_breakdown] = fast_stiffness_assembly_gpu(space, YOUNG, POISSON, xPhys, penal, Emin, symmetrize)
+function [K, t_breakdown] = fast_stiffness_assembly_gpu(space, YOUNG, POISSON, xPhys, penal, Emin, symmetrize, layout)
 % FAST_STIFFNESS_ASSEMBLY_GPU GPU-accelerated matrix formation for IGA Elasticity
 % utilizing NVIDIA CUDA hardware via MATLAB gpuArray and batched operations.
 %
@@ -15,6 +15,7 @@ if nargin < 4 || isempty(xPhys), xPhys = []; end
 if nargin < 5 || isempty(penal), penal = 3; end
 if nargin < 6 || isempty(Emin), Emin = 1e-9; end
 if nargin < 7 || isempty(symmetrize), symmetrize = true; end
+if nargin < 8 || isempty(layout), layout = 'interior'; end
 
 t_start = tic;
 
@@ -22,7 +23,7 @@ t_start = tic;
 t_prep = tic;
 nsd = space.dim;
 for idim = 1:nsd
-    Quad_rules(idim) = iga_wq_rules_1d(space.knots{idim}, space.degree(idim));
+    Quad_rules(idim) = iga_wq_rules_1d(space.knots{idim}, space.degree(idim), layout);
     Connectivity(idim).neighbors = Quad_rules(idim).neighbors;
     Connectivity(idim).num_neigh = cellfun(@numel, Connectivity(idim).neighbors);
     qn{idim} = Quad_rules(idim).all_points';
