@@ -19,9 +19,6 @@ if nargin < 6 || isempty(rmin), rmin = 1.5; end
 if nargin < 7 || isempty(max_iter), max_iter = 40; end
 if nargin < 8 || isempty(solver_type), solver_type = 'gpu_mf_fp32'; end
 
-addpath(genpath('C:\Users\dshgu\OneDrive\Documents\geopdes-master'));
-addpath('c:\Users\dshgu\OneDrive\Documents\FastFormation');
-
 fprintf('========================================================================\n');
 fprintf('  3D ISOGEOMETRIC TOPOLOGY OPTIMIZATION\n');
 fprintf('  Mesh: %dx%dx%d (%d elements) | VolFrac: %.2f | Solver: %s\n', ...
@@ -30,29 +27,18 @@ fprintf('=======================================================================
 
 %% 1. Geometry and 3D Spline Spaces
 L = 1.2; h = 0.6; w = 0.3;
-srf = nrb4surf([0 0 0], [L 0 0], [0 h 0], [L h 0]);
-vol = nrbextrude(srf, [0 0 w]);
-
-problem_data.geo_name = vol;
-problem_data.drchlt_sides = []; problem_data.nmnn_sides = [];
-problem_data.press_sides = [];  problem_data.symm_sides = [];
-problem_data.E  = 1.0; problem_data.nu = 0.3;
-problem_data.lambda_lame = @(x, y, z) (0.3*1.0/((1+0.3)*(1-2*0.3)) * ones(size(x)));
-problem_data.mu_lame     = @(x, y, z) (1.0/(2*(1+0.3)) * ones(size(x)));
+E0 = 1.0; nu = 0.3;
+lambda = nu * E0 / ((1 + nu) * (1 - 2 * nu));
+mu = E0 / (2 * (1 + nu));
 
 p = 2;
-method_data.degree     = [p, p, p];
-method_data.regularity = [p-1, p-1, p-1];
-method_data.nsub       = [nelx, nely, nelz];
-method_data.nquad      = [p+1, p+1, p+1];
-
-[geometry, msh, sp] = buildSpaces(problem_data, method_data);
+sp = iga_space_box([0 L; 0 h; 0 w], [nelx, nely, nelz], p);
 
 % Boundary DOFs: Clamped at x = 0
-ncp_dir = sp.scalar_spaces{1}.ndof_dir;
-[i1, i2, i3] = ind2sub(ncp_dir, 1:sp.scalar_spaces{1}.ndof);
+ncp_dir = sp.ndof_dir;
+[i1, i2, i3] = ind2sub(ncp_dir, 1:sp.ndof_sc);
 clamped_sc = find(i1 == 1);
-ndof_sc = sp.scalar_spaces{1}.ndof;
+ndof_sc = sp.ndof_sc;
 clamped_dofs = [clamped_sc, clamped_sc + ndof_sc, clamped_sc + 2*ndof_sc];
 free_dofs = setdiff(1:sp.ndof, clamped_dofs);
 free_mask = false(sp.ndof, 1); free_mask(free_dofs) = true;
@@ -65,17 +51,13 @@ F(load_dofs_y) = -1.0 / numel(load_dofs_y);
 
 %% 2. Precompute 3D Element Operators
 t_pre = tic;
-sp_col = sp_precompute(sp, msh, 'gradient', true, 'divergence', true);
-msh_col = msh_precompute(msh);
-l_val = problem_data.lambda_lame(0, 0, 0) * ones(msh.nqn, msh.nel);
-m_val = problem_data.mu_lame(0, 0, 0) * ones(msh.nqn, msh.nel);
-[rows_all, cols_all, vals0_all] = op_su_ev(sp_col, sp_col, msh_col, l_val, m_val);
-
-nel = msh.nel;
-nsh = sp_col.nsh_max;
-rows_e = reshape(rows_all, [nsh, nsh, nel]);
-vals_e = reshape(vals0_all, [nsh, nsh, nel]);
-conn_e = squeeze(rows_e(:, 1, :)); % [nsh x nel]
+[Ke, type_id] = iga_elasticity_element_matrices(sp, lambda, mu);
+nel = sp.nel;
+nsh = sp.nsh;
+conn_e = sp.connectivity; % [nsh x nel]
+vals_e = Ke(:, :, type_id);
+[rows_all, cols_all] = iga_element_rows_cols(conn_e);
+vals0_all = vals_e(:);
 n_per_el = nsh^2;
 t_precomp = toc(t_pre);
 fprintf('3D Element Precomputation: %.2f s (%d DOFs, %d elements)\n', ...

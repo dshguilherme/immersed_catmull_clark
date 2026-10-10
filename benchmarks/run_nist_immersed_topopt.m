@@ -4,8 +4,6 @@
 % Ghost Penalty stabilization, and FastFormation GPU Matrix-Free PCG solver.
 clear; clc; close all;
 addpath(genpath('src'));
-addpath(genpath('C:\Users\dshgu\OneDrive\Documents\geopdes-master'));
-addpath('C:\Users\dshgu\OneDrive\Documents\FastFormation');
 
 step_file = 'C:/Users/dshgu/immersed-iga/Models/NIST-PMI-STEP-Files/NIST-PMI-STEP-Files/AP203 geometry only/nist_ctc_01_asme1_rd.stp';
 

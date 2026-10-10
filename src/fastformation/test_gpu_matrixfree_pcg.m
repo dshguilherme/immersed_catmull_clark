@@ -1,32 +1,21 @@
 % test_gpu_matrixfree_pcg.m
-addpath(genpath('C:\Users\dshgu\OneDrive\Documents\geopdes-master'));
-addpath('c:\Users\dshgu\OneDrive\Documents\FastFormation');
 
 nelx = 40; nely = 20; p = 3;
-pd = cantilever_beam(1.0, 0.5);
-md.degree = [p p]; md.regularity = [p-1 p-1]; md.nsub = [nelx nely]; md.nquad = [p+1 p+1];
-[geometry, msh, sp] = buildSpaces(pd, md);
-[free_dofs, ~] = grab_cantilever_dofs(sp);
+sp = iga_space_box([0 1.0; 0 0.5], [nelx nely], p);
+free_dofs = setdiff(1:sp.ndof, sp.boundary(1).dofs);
 
-F = op_f_v_tp(sp, msh, pd.f);
-Fy_tot = abs(sum(F(sp.scalar_spaces{1}.ndof + 1 : end)));
+F = iga_load_vector(sp, @(x, y) iga_cantilever_tip_load(x, y, 1.0, 0.5, 'center'));
+Fy_tot = abs(sum(F(sp.ndof_sc + 1 : end)));
 if Fy_tot > 0, F = F / Fy_tot; end
 
 % Precompute element stiffness matrices
-sp_col = sp_precompute(sp, msh, 'gradient', true, 'divergence', true);
-msh_col = msh_precompute(msh);
-l_val = pd.lambda_lame(0, 0) * ones(msh.nqn, msh.nel);
-m_val = pd.mu_lame(0, 0) * ones(msh.nqn, msh.nel);
-[rows_all, cols_all, vals0_all] = op_su_ev(sp_col, sp_col, msh_col, l_val, m_val);
-
-% Extract per-element connectivity and local matrices
-nel = msh.nel;
-nsh = sp_col.nsh_max;
-rows_e = reshape(rows_all, [nsh, nsh, nel]);
-cols_e = reshape(cols_all, [nsh, nsh, nel]);
-vals_e = reshape(vals0_all, [nsh, nsh, nel]);
-
-conn_e = squeeze(rows_e(:, 1, :)); % [nsh x nel] global DOF indices for each element
+[Ke, type_id] = iga_elasticity_element_matrices(sp, 0.3 / (1.3 * 0.4), 1 / 2.6);
+nel = sp.nel;
+nsh = sp.nsh;
+vals_e = Ke(:, :, type_id);
+conn_e = sp.connectivity; % [nsh x nel] global DOF indices for each element
+[rows_all, cols_all] = iga_element_rows_cols(conn_e);
+vals0_all = vals_e(:);
 
 % Test matrix-vector multiplication with random density
 xPhys = 0.5 * ones(nelx, nely);

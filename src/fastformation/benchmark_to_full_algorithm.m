@@ -4,8 +4,6 @@
 % in both 2D and 3D settings.
 
 clearvars; clc; close all;
-addpath(genpath('C:\Users\dshgu\OneDrive\Documents\geopdes-master'));
-addpath('c:\Users\dshgu\OneDrive\Documents\FastFormation');
 
 fprintf('========================================================================\n');
 fprintf('  BENCHMARK: COMPLETE END-TO-END TOPOLOGY OPTIMIZATION ALGORITHMS\n');

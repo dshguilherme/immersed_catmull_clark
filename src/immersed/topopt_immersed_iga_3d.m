@@ -82,52 +82,16 @@ E0 = 1.0; nu = 0.3;
 lambda = (E0 * nu) / ((1 + nu) * (1 - 2*nu));
 mu = E0 / (2 * (1 + nu));
 
-srf_tmpl = nrb4surf([0 0 0], [3*hx 0 0], [0 3*hy 0], [3*hx 3*hy 0]);
-pdata_t.geo_name = nrbextrude(srf_tmpl, [0 0 3*hz]);
-pdata_t.drchlt_sides = []; pdata_t.nmnn_sides = []; pdata_t.press_sides = []; pdata_t.symm_sides = [];
-pdata_t.E = E0; pdata_t.nu = nu;
-pdata_t.lambda_lame = @(x,y,z) lambda * ones(size(x));
-pdata_t.mu_lame     = @(x,y,z) mu * ones(size(x));
-mdata_t.degree = [p, p, p]; mdata_t.regularity = [p-1, p-1, p-1];
-mdata_t.nsub = [3 3 3]; mdata_t.nquad = [p+1, p+1, p+1];
-[~, msh_t, sp_t] = buildSpaces(pdata_t, mdata_t);
-sp_col_t = sp_precompute(sp_t, msh_t, 'gradient', true, 'divergence', true);
-msh_col_t = msh_precompute(msh_t);
-l_val_t = lambda * ones(msh_t.nqn, msh_t.nel);
-m_val_t = mu * ones(msh_t.nqn, msh_t.nel);
-[~, ~, vt] = op_su_ev(sp_col_t, sp_col_t, msh_col_t, l_val_t, m_val_t);
-nsh = sp_col_t.nsh_max;
-ve_tmpl = single(reshape(vt, [nsh, nsh, 3, 3, 3]));
-
-% Full grid connectivity
-srf_full = nrb4surf([grid_bounds(1,1), grid_bounds(2,1), grid_bounds(3,1)], ...
-                    [grid_bounds(1,2), grid_bounds(2,1), grid_bounds(3,1)], ...
-                    [grid_bounds(1,1), grid_bounds(2,2), grid_bounds(3,1)], ...
-                    [grid_bounds(1,2), grid_bounds(2,2), grid_bounds(3,1)]);
-vol_full = nrbextrude(srf_full, [0, 0, Lz]);
-pdata_f.geo_name = vol_full;
-pdata_f.drchlt_sides = []; pdata_f.nmnn_sides = []; pdata_f.press_sides = []; pdata_f.symm_sides = [];
-pdata_f.E = E0; pdata_f.nu = nu;
-pdata_f.lambda_lame = @(x,y,z) lambda * ones(size(x));
-pdata_f.mu_lame     = @(x,y,z) mu * ones(size(x));
-mdata_f.degree = [p, p, p]; mdata_f.regularity = [p-1, p-1, p-1];
-mdata_f.nsub = grid_res; mdata_f.nquad = [p+1, p+1, p+1];
-[~, msh_f, sp_f] = buildSpaces(pdata_f, mdata_f);
-sp_col_f = sp_precompute(sp_f, msh_f, 'gradient', false, 'divergence', false);
-conn_e = sp_col_f.connectivity;
+sp_f = iga_space_box(grid_bounds, grid_res, p);
+conn_e = sp_f.connectivity;
+nsh = sp_f.nsh;
 ndof = sp_f.ndof;
-ndof_sc = sp_f.scalar_spaces{1}.ndof;
-ncp_dir = sp_f.scalar_spaces{1}.ndof_dir;
+ndof_sc = sp_f.ndof_sc;
+ncp_dir = sp_f.ndof_dir;
 
-[ix, iy, iz] = ind2sub(grid_res, 1:nel);
-tx = 2 * ones(1, nel); tx(ix == 1) = 1; tx(ix == nelx) = 3;
-ty = 2 * ones(1, nel); ty(iy == 1) = 1; ty(iy == nely) = 3;
-tz = 2 * ones(1, nel); tz(iz == 1) = 1; tz(iz == nelz) = 3;
-
-vals_e = zeros(nsh, nsh, nel, 'single');
-for e = 1:nel
-    vals_e(:, :, e) = ve_tmpl(:, :, tx(e), ty(e), tz(e));
-end
+[Ke_types, type_id] = iga_elasticity_element_matrices(sp_f, lambda, mu);
+Ke_types = single(Ke_types);
+vals_e = Ke_types(:, :, type_id);
 
 % 4. Ghost Penalty Stabilization on Active Cut Faces
 if opts.gamma_gp > 0

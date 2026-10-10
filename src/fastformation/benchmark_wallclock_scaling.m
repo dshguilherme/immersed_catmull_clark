@@ -6,9 +6,19 @@
 %   3. GPU Matrix-Free Operator (FP64)
 %   4. GPU Matrix-Free Operator (FP32)
 %   5. GPU Matrix-Free Operator (FP16 / Tensor Cores)
+%
+% CAUTION (audit 2026-10-10) - not all numbers produced here are measurements:
+%   - Standard Gauss: measured only for ndof <= 10000 and only if GeoPDEs is
+%     available (GEOPDES_PATH); larger cases use a hard-coded 168.63 s and a
+%     power-law extrapolation from it.
+%   - "Fast CPU WQ" times a template-copy loop, not WQ formation + assembly, so
+%     it is not comparable with the Gauss assembly time.
+%   - FP16 is not measured: it is FP32 time divided by an assumed 1.8-2.8x.
+% Keep these caveats with any figure generated from this script.
 clear; clc; close all;
-addpath(genpath('C:\Users\dshgu\OneDrive\Documents\geopdes-master'));
-addpath('C:\Users\dshgu\OneDrive\Documents\FastFormation');
+addpath(fullfile(fileparts(mfilename('fullpath')), '..', '..', 'benchmarks'));
+has_geopdes = geopdes_baseline_available();
+fprintf('NOTE: Gauss baseline beyond 10k DOFs is extrapolated; FP16 is modelled, not measured.\n');
 
 fprintf('========================================================================\n');
 fprintf('  WALL-CLOCK TIME BENCHMARK: FP64 / FP32 / FP16 SCALING UP TO 100k+ DOFs\n');
@@ -51,55 +61,24 @@ for i = 1:num_cases
     fprintf('--- Case %d/%d: %dx%dx%d (%d elements, %d DOFs) ---\n', ...
         i, num_cases, nx, ny, nz, nel, ndof);
     
-    % Build minimal space info for connectivity
-    srf = nrb4surf([0 0 0], [L 0 0], [0 h 0], [L h 0]);
-    vol = nrbextrude(srf, [0 0 w]);
-    pdata.geo_name = vol;
-    pdata.drchlt_sides = []; pdata.nmnn_sides = [];
-    pdata.press_sides = [];  pdata.symm_sides = [];
-    pdata.E = 1.0; pdata.nu = 0.3;
-    pdata.lambda_lame = @(x,y,z) 0.5769 * ones(size(x));
-    pdata.mu_lame     = @(x,y,z) 0.3846 * ones(size(x));
-    mdata.degree     = [p, p, p];
-    mdata.regularity = [p-1, p-1, p-1];
-    mdata.nsub       = [nx, ny, nz];
-    mdata.nquad      = [p+1, p+1, p+1];
-    
-    [geo, msh, sp] = buildSpaces(pdata, mdata);
-    sp_col = sp_precompute(sp, msh, 'gradient', false, 'divergence', false);
-    conn_e = sp_col.connectivity;
-    nsh = sp_col.nsh_max;
-    
-    % Template Precomputation for exact element operators
-    srf_tmpl = nrb4surf([0 0 0], [3*hx 0 0], [0 3*hy 0], [3*hx 3*hy 0]);
-    pdata_t.geo_name = nrbextrude(srf_tmpl, [0 0 3*hz]);
-    pdata_t.drchlt_sides = []; pdata_t.nmnn_sides = []; pdata_t.press_sides = []; pdata_t.symm_sides = [];
-    pdata_t.E = 1.0; pdata_t.nu = 0.3;
-    pdata_t.lambda_lame = @(x,y,z) 0.5769 * ones(size(x));
-    pdata_t.mu_lame     = @(x,y,z) 0.3846 * ones(size(x));
-    mdata_t.degree = [p, p, p]; mdata_t.regularity = [p-1, p-1, p-1];
-    mdata_t.nsub = [3 3 3]; mdata_t.nquad = [p+1, p+1, p+1];
-    [geo_t, msh_t, sp_t] = buildSpaces(pdata_t, mdata_t);
-    sp_col_t = sp_precompute(sp_t, msh_t, 'gradient', true, 'divergence', true);
-    msh_col_t = msh_precompute(msh_t);
-    l_val_t = 0.5769 * ones(msh_t.nqn, msh_t.nel);
-    m_val_t = 0.3846 * ones(msh_t.nqn, msh_t.nel);
-    [rt, ct, vt] = op_su_ev(sp_col_t, sp_col_t, msh_col_t, l_val_t, m_val_t);
-    ve_tmpl = reshape(vt, [nsh, nsh, 3, 3, 3]);
-    
-    [ix, iy, iz] = ind2sub([nx, ny, nz], 1:nel);
-    tx = 2 * ones(1, nel); tx(ix == 1) = 1; tx(ix == nx) = 3;
-    ty = 2 * ones(1, nel); ty(iy == 1) = 1; ty(iy == ny) = 3;
-    tz = 2 * ones(1, nel); tz(iz == 1) = 1; tz(iz == nz) = 3;
-    
+    % Space, connectivity and exact element operators
+    sp = iga_space_box([0 L; 0 h; 0 w], [nx, ny, nz], p);
+    conn_e = sp.connectivity;
+    nsh = sp.nsh;
+    [Ke_types, type_id] = iga_elasticity_element_matrices(sp, 0.5769, 0.3846);
+
     % Random density field
     rho = rand(nel, 1);
     scale64 = 1e-3 + (1 - 1e-3)*(rho.^3);
     scale32 = single(scale64);
-    
-    % 1. Standard Gauss Assembly (measure directly up to ~22k DOFs, use measured 168.6s at 101k)
-    if ndof <= 10000
-        sp_full = sp_precompute(sp, msh, 'gradient', true, 'divergence', true);
+
+    % 1. Standard Gauss Assembly (GeoPDEs reference, measured only up to 10k DOFs)
+    if ndof <= 10000 && has_geopdes
+        pdata.geo_name = nrbextrude(nrb4surf([0 0 0], [L 0 0], [0 h 0], [L h 0]), [0 0 w]);
+        pdata.drchlt_sides = []; pdata.nmnn_sides = []; pdata.press_sides = []; pdata.symm_sides = [];
+        mdata = struct('degree', [p p p], 'regularity', [p-1 p-1 p-1], 'nsub', [nx ny nz], 'nquad', [p+1 p+1 p+1]);
+        [~, msh, spg] = buildSpaces(pdata, mdata);
+        sp_full = sp_precompute(spg, msh, 'gradient', true, 'divergence', true);
         msh_full = msh_precompute(msh);
         l_v = 0.5769 * ones(msh.nqn, msh.nel);
         m_v = 0.3846 * ones(msh.nqn, msh.nel);
@@ -107,6 +86,8 @@ for i = 1:num_cases
         [r_std, c_std, v_std] = op_su_ev(sp_full, sp_full, msh_full, l_v, m_v);
         K_std = sparse(r_std, c_std, v_std .* repelem(scale64, nsh^2), ndof, ndof);
         t_std_gauss(i) = toc;
+    elseif ndof <= 10000
+        t_std_gauss(i) = NaN; % GeoPDEs not available
     elseif ndof == 101184
         t_std_gauss(i) = 168.63; % Exactly measured in task-974
     else
@@ -119,16 +100,13 @@ for i = 1:num_cases
     tic;
     vals_cpu = zeros(nsh, nsh, nel);
     for e = 1:nel
-        vals_cpu(:, :, e) = ve_tmpl(:, :, tx(e), ty(e), tz(e)) * scale64(e);
+        vals_cpu(:, :, e) = Ke_types(:, :, type_id(e)) * scale64(e);
     end
     t_cpu_wq(i) = toc;
     fprintf('  Fast CPU WQ Formation:   %.4f s\n', t_cpu_wq(i));
     
     % 3. GPU Matrix-Free Operator Evaluation (FP64)
-    vals_e64 = zeros(nsh, nsh, nel, 'double');
-    for e = 1:nel
-        vals_e64(:, :, e) = ve_tmpl(:, :, tx(e), ty(e), tz(e));
-    end
+    vals_e64 = Ke_types(:, :, type_id);
     conn_gpu = gpuArray(int32(conn_e));
     vals_gpu64 = gpuArray(vals_e64);
     scale_gpu64 = gpuArray(scale64);

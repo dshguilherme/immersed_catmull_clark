@@ -6,8 +6,6 @@
 % 4. Assembly timing vs k-refinement (C^{p-1} maximal continuity)
 
 clearvars; clc; close all;
-addpath(genpath('C:\Users\dshgu\OneDrive\Documents\geopdes-master'));
-addpath('c:\Users\dshgu\OneDrive\Documents\FastFormation');
 
 fprintf('########################################################################\n');
 fprintf('  STARTING COMPLETE BENCHMARK SUITE FOR FAST MATRIX FORMATION IN IGA   \n');

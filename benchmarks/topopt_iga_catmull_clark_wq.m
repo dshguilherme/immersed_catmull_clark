@@ -18,8 +18,7 @@ if nargin < 7 || isempty(device), device = 'gpu'; end
 if nargin < 8 || isempty(precision), precision = 'double'; end
 
 % Paths
-addpath(genpath('C:\Users\dshgu\OneDrive\Documents\geopdes-master'));
-addpath('C:\Users\dshgu\OneDrive\Documents\FastFormation');
+addpath(fullfile(fileparts(mfilename('fullpath')), '..', 'src', 'iga'));
 addpath(fullfile(fileparts(mfilename('fullpath')), '..', 'src', 'catmull_clark'));
 addpath(fullfile(fileparts(mfilename('fullpath')), '..', 'src', 'fastformation'));
 
@@ -32,18 +31,12 @@ fprintf('=======================================================================
 %% 1. Problem Geometry and Discrete Spaces
 L = 1.0; h = 0.5;
 degree = 3;
-problem_data = cantilever_beam(L, h);
-method_data.degree     = [degree, degree];
-method_data.regularity = [degree-1, degree-1];
-method_data.nsub       = [nelx, nely];
-method_data.nquad      = [degree+1, degree+1];
+space = iga_space_box([0 L; 0 h], [nelx, nely], degree);
+free_dofs = setdiff(1:space.ndof, space.boundary(1).dofs);
 
-[geometry, msh, space] = buildSpaces(problem_data, method_data);
-[free_dofs, ~] = grab_cantilever_dofs(space);
-
-% External Force Vector (normalized point load on center-right edge)
-F = op_f_v_tp(space, msh, problem_data.f);
-Fy_tot = abs(sum(F(space.scalar_spaces{1}.ndof + 1 : end)));
+% External Force Vector (normalized distributed load on center-right edge)
+F = iga_load_vector(space, @(x, y) iga_cantilever_tip_load(x, y, L, h, 'center'));
+Fy_tot = abs(sum(F(space.ndof_sc + 1 : end)));
 if Fy_tot > 0
     F = F / Fy_tot;
 end
@@ -52,8 +45,7 @@ end
 % One-time geometry-dependent setup; independent of design density
 t_setup = tic;
 YOUNG = 1.0; POISSON = 0.3;
-S_wq = wq_setup(msh, space, geometry, YOUNG, POISSON, device, precision);
-msh_col = msh_precompute(msh);
+S_wq = wq_setup(space, YOUNG, POISSON, device, precision);
 t_setup_time = toc(t_setup);
 fprintf('WQ Batched Operator initialized in %.2f s (Device: %s)\n\n', ...
     t_setup_time, device);
@@ -61,20 +53,18 @@ fprintf('WQ Batched Operator initialized in %.2f s (Device: %s)\n\n', ...
 %% 3. Catmull-Clark Limit Control Point Lattice
 % On regular quadrilateral mesh, Catmull-Clark control point net has
 % dimensions ncp_x x ncp_y with C^2 continuity
-ncp_x = space.scalar_spaces{1}.ndof_dir(1);
-ncp_y = space.scalar_spaces{1}.ndof_dir(2);
+ncp_x = space.ndof_dir(1);
+ncp_y = space.ndof_dir(2);
 n_vars = ncp_x * ncp_y;
 
 % Initial uniform distribution for Catmull-Clark control points
 xPhys = volfrac * ones(ncp_x, ncp_y);
 
 % Evaluation of 1D Catmull-Clark bases at element centers for volume evaluation
-knots_x = space.scalar_spaces{1}.knots{1};
-knots_y = space.scalar_spaces{1}.knots{2};
-xc = 0.5 * (msh.breaks{1}(1:end-1) + msh.breaks{1}(2:end));
-yc = 0.5 * (msh.breaks{2}(1:end-1) + msh.breaks{2}(2:end));
-P1 = bspeval(degree, eye(ncp_x), knots_x, xc)';
-P2 = bspeval(degree, eye(ncp_y), knots_y, yc)';
+xc = 0.5 * (space.breaks{1}(1:end-1) + space.breaks{1}(2:end));
+yc = 0.5 * (space.breaks{2}(1:end-1) + space.breaks{2}(2:end));
+P1 = iga_bspline_basis(space.knots{1}, degree, xc);
+P2 = iga_bspline_basis(space.knots{2}, degree, yc);
 
 V_target = volfrac * (nelx * nely);
 V_eval = @(x) sum(sum(P1 * x * (P2')));
@@ -111,7 +101,7 @@ while iter < max_iter && change > 1e-3
     
     % --- Step 3: Sensitivity Formulation via Fast Sensitivities ---
     % Evaluates exact sensitivities at Catmull-Clark control points
-    dC_cp = fast_sensitivities(U, msh_col, space, geometry, xPhys, 'spline', penal, Emin, YOUNG, POISSON);
+    dC_cp = fast_sensitivities(U, space, xPhys, 'spline', penal, Emin, YOUNG, POISSON);
     sens = -dC_cp;
     
     % --- Step 4: Optimality Criteria Bisection Search ---

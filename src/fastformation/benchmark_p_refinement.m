@@ -4,8 +4,6 @@
 % Generates publication-grade white-background plot with clean typography.
 
 clearvars; clc; close all;
-addpath(genpath('C:\Users\dshgu\OneDrive\Documents\geopdes-master'));
-addpath('C:\Users\dshgu\OneDrive\Documents\FastFormation');
 
 fprintf('========================================================================\n');
 fprintf('  COMPARISON 3: Assembly Timing vs p-Refinement (Degree Elevation)\n');
@@ -26,36 +24,28 @@ fprintf('%s\n', repmat('-', 1, 74));
 
 rng(42);
 xPhys = rand(nsub(1), nsub(2));
+addpath(fullfile(fileparts(mfilename('fullpath')), '..', '..', 'benchmarks'));
+lambda = 0.3 / (1.3 * 0.4); mu = 1 / 2.6;   % E = 1, nu = 0.3
 
 for i = 1:numel(p_list)
     p = p_list(i);
-    
-    problem_data = cantilever_beam(1.0, 0.5);
-    method_data.degree     = [p, p];
-    method_data.regularity = [p-1, p-1];
-    method_data.nsub       = nsub;
-    method_data.nquad      = [p+1, p+1];
-    
-    [geometry, msh, sp] = buildSpaces(problem_data, method_data);
+
+    sp = iga_space_box([0 1.0; 0 0.5], nsub, p);
     p_dofs(i) = sp.ndof;
-    
-    % 1. Normal GeoPDEs Tensor-Product Assembly
-    tic;
-    K_norm = op_su_ev_tp(sp, sp, msh, problem_data.lambda_lame, problem_data.mu_lame);
-    t_normal(i) = toc;
-    
+
+    % 1. Normal GeoPDEs Tensor-Product Assembly (external reference; NaN without GeoPDEs)
+    t_normal(i) = geopdes_gauss_baseline([0 1.0; 0 0.5], nsub, p, lambda, mu);
+
     % 2. Fast CPU Assembly (WQ + Sum-Factorization)
     tic;
-    K_f = fast_stiffness_assembly(msh, sp, geometry, 1.0, 0.3, xPhys, 'element', 3, 1e-3, true);
+    K_f = fast_stiffness_assembly(sp, 1.0, 0.3, xPhys, 'element', 3, 1e-3, true);
     t_fast(i) = toc;
-    
-    % 3. Fast GPU Operator Evaluation (RTX 2050 Laptop GPU)
-    sp_col = sp_precompute(sp, msh, 'gradient', true, 'divergence', true);
-    msh_col = msh_precompute(msh);
-    l_val = problem_data.lambda_lame(0, 0) * ones(msh.nqn, msh.nel);
-    m_val = problem_data.mu_lame(0, 0) * ones(msh.nqn, msh.nel);
-    [rows, cols, vals0] = op_su_ev(sp_col, sp_col, msh_col, l_val, m_val);
-    n_per_el = sp_col.nsh_max^2;
+
+    % 3. "Fast GPU": NOTE this times only the SIMP scaling of precomputed element
+    %    values on the device (one elementwise product), not an assembly.
+    [Ke, type_id] = iga_elasticity_element_matrices(sp, lambda, mu);
+    vals0 = reshape(Ke(:, :, type_id), [], 1);
+    n_per_el = sp.nsh^2;
     scale = repelem(1e-3 + (1 - 1e-3)*(xPhys(:).^3), n_per_el);
     
     % Measure GPU device scaling and stream execution

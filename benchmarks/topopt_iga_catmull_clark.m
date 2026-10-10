@@ -17,8 +17,7 @@ if nargin < 6 || isempty(max_iter), max_iter = 50; end
 if nargin < 7 || isempty(use_gpu), use_gpu = true; end
 
 % Paths
-addpath(genpath('C:\Users\dshgu\OneDrive\Documents\geopdes-master'));
-addpath('C:\Users\dshgu\OneDrive\Documents\FastFormation');
+addpath(fullfile(fileparts(mfilename('fullpath')), '..', 'src', 'iga'));
 addpath(fullfile(fileparts(mfilename('fullpath')), '..', 'src', 'catmull_clark'));
 addpath(fullfile(fileparts(mfilename('fullpath')), '..', 'src', 'fastformation'));
 
@@ -32,37 +31,30 @@ fprintf('=======================================================================
 %% 1. Problem Geometry and Basis Spaces
 L = 1.0; h = 0.5;
 degree = 3;
-problem_data = cantilever_beam(L, h);
-method_data.degree     = [degree, degree];
-method_data.regularity = [degree-1, degree-1];
-method_data.nsub       = [nelx, nely];
-method_data.nquad      = [degree+1, degree+1];
-
-[geometry, msh, space] = buildSpaces(problem_data, method_data);
-[free_dofs, ~] = grab_cantilever_dofs(space);
+E0 = 1; nu = 0.3;
+lambda = nu * E0 / ((1 + nu) * (1 - 2 * nu));
+mu = E0 / (2 * (1 + nu));
+space = iga_space_box([0 L; 0 h], [nelx, nely], degree);
+free_dofs = setdiff(1:space.ndof, space.boundary(1).dofs);
 free_mask = false(space.ndof, 1);
 free_mask(free_dofs) = true;
 
-% External Force Vector (normalized point load on center-right edge)
-F = op_f_v_tp(space, msh, problem_data.f);
-Fy_tot = abs(sum(F(space.scalar_spaces{1}.ndof + 1 : end)));
+% External Force Vector (normalized distributed load on center-right edge)
+F = iga_load_vector(space, @(x, y) iga_cantilever_tip_load(x, y, L, h, 'center'));
+Fy_tot = abs(sum(F(space.ndof_sc + 1 : end)));
 if Fy_tot > 0
     F = F / Fy_tot;
 end
 
 %% 2. FastFormation Precomputed Element Stiffness Operator
 t_pre = tic;
-sp_col = sp_precompute(space, msh, 'gradient', true, 'divergence', true);
-msh_col = msh_precompute(msh);
-l_val = problem_data.lambda_lame(0, 0) * ones(msh.nqn, msh.nel);
-m_val = problem_data.mu_lame(0, 0) * ones(msh.nqn, msh.nel);
-[rows, cols, vals0] = op_su_ev(sp_col, sp_col, msh_col, l_val, m_val);
-
-nel = msh.nel;
-nsh = sp_col.nsh_max;
-rows_e = reshape(rows, [nsh, nsh, nel]);
-vals_e = reshape(vals0, [nsh, nsh, nel]);
-conn_e = squeeze(rows_e(:, 1, :)); % [nsh x nel]
+[Ke, type_id] = iga_elasticity_element_matrices(space, lambda, mu);
+nel = space.nel;
+nsh = space.nsh;
+conn_e = space.connectivity; % [nsh x nel]
+vals_e = Ke(:, :, type_id);
+[rows, cols] = iga_element_rows_cols(conn_e);
+vals0 = vals_e(:);
 
 n_per_el = nsh^2;
 t_pre_time = toc(t_pre);

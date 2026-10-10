@@ -21,9 +21,6 @@ if nargin < 6 || isempty(max_iter), max_iter = 60; end
 if nargin < 7 || isempty(density_type), density_type = 'element'; end
 if nargin < 8 || isempty(degree), degree = 3; end
 
-addpath(genpath('C:\Users\dshgu\OneDrive\Documents\geopdes-master'));
-addpath('c:\Users\dshgu\OneDrive\Documents\FastFormation');
-
 fprintf('========================================================================\n');
 fprintf('  ISOGEOMETRIC TOPOLOGY OPTIMIZATION (HIGH-PERFORMANCE KERNEL)\n');
 fprintf('  Mesh: %d x %d | Degree: p = %d (C^{%d}) | VolFrac: %.2f | Type: %s\n', ...
@@ -32,32 +29,27 @@ fprintf('=======================================================================
 
 %% 1. Problem Setup and Mesh Construction
 L = 1.0; h = 0.5;
-problem_data = cantilever_beam(L, h);
-method_data.degree     = [degree, degree];
-method_data.regularity = [degree-1, degree-1];
-method_data.nsub       = [nelx, nely];
-method_data.nquad      = [degree+1, degree+1];
-
-[geometry, msh, space] = buildSpaces(problem_data, method_data);
+E0 = 1; nu = 0.3;
+lambda = nu * E0 / ((1 + nu) * (1 - 2 * nu));
+mu = E0 / (2 * (1 + nu));
+space = iga_space_box([0 L; 0 h], [nelx, nely], degree);
 
 % Boundary DOFs (clamped on left face x = 0)
-[free_dofs, ~] = grab_cantilever_dofs(space);
+free_dofs = setdiff(1:space.ndof, space.boundary(1).dofs);
 
-% External Force Vector (normalized point load on center-right edge)
-F = op_f_v_tp(space, msh, problem_data.f);
-Fy_tot = abs(sum(F(space.scalar_spaces{1}.ndof + 1 : end)));
+% External Force Vector (normalized distributed load on center-right edge)
+F = iga_load_vector(space, @(x, y) iga_cantilever_tip_load(x, y, L, h, 'center'));
+Fy_tot = abs(sum(F(space.ndof_sc + 1 : end)));
 if Fy_tot > 0
     F = F / Fy_tot;
 end
 
 %% 2. Fast Precomputed Element Stiffness Operator
 t_pre = tic;
-sp_col = sp_precompute(space, msh, 'gradient', true, 'divergence', true);
-msh_col = msh_precompute(msh);
-l_val = problem_data.lambda_lame(0, 0) * ones(msh.nqn, msh.nel);
-m_val = problem_data.mu_lame(0, 0) * ones(msh.nqn, msh.nel);
-[rows, cols, vals0] = op_su_ev(sp_col, sp_col, msh_col, l_val, m_val);
-n_per_el = sp_col.nsh_max^2;
+[Ke, type_id] = iga_elasticity_element_matrices(space, lambda, mu);
+[rows, cols] = iga_element_rows_cols(space.connectivity);
+vals0 = reshape(Ke(:, :, type_id), [], 1);
+n_per_el = space.nsh^2;
 t_pre_time = toc(t_pre);
 fprintf('Operator precomputed in %.2f s (DOFs: %d, Non-zeros: %d)\n\n', ...
     t_pre_time, space.ndof, numel(vals0));
@@ -89,19 +81,17 @@ if strcmpi(density_type, 'element')
     
 else
     % Option B: Continuous B-spline parameterization
-    ncp_x = space.scalar_spaces{1}.ndof_dir(1);
-    ncp_y = space.scalar_spaces{1}.ndof_dir(2);
+    ncp_x = space.ndof_dir(1);
+    ncp_y = space.ndof_dir(2);
     n_vars = ncp_x * ncp_y;
     xPhys = volfrac * ones(ncp_x, ncp_y);
-    
+
     % Evaluation of 1D B-spline bases at element centers
-    knots_x = space.scalar_spaces{1}.knots{1};
-    knots_y = space.scalar_spaces{1}.knots{2};
-    xc = 0.5 * (msh.breaks{1}(1:end-1) + msh.breaks{1}(2:end));
-    yc = 0.5 * (msh.breaks{2}(1:end-1) + msh.breaks{2}(2:end));
-    
-    P1 = bspeval(degree, eye(ncp_x), knots_x, xc)'; % [nelx x ncp_x]
-    P2 = bspeval(degree, eye(ncp_y), knots_y, yc)'; % [nely x ncp_y]
+    xc = 0.5 * (space.breaks{1}(1:end-1) + space.breaks{1}(2:end));
+    yc = 0.5 * (space.breaks{2}(1:end-1) + space.breaks{2}(2:end));
+
+    P1 = iga_bspline_basis(space.knots{1}, degree, xc); % [nelx x ncp_x]
+    P2 = iga_bspline_basis(space.knots{2}, degree, yc); % [nely x ncp_y]
     
     V_target = volfrac * (nelx * nely);
 end
@@ -143,7 +133,7 @@ while iter < max_iter && change > 1e-3
     c = F' * U;
     compliance_history(iter) = c;
     
-    ce = sum(reshape(U(rows) .* vals0 .* U(cols), n_per_el, msh.nel), 1)';
+    ce = sum(reshape(U(rows) .* vals0 .* U(cols), n_per_el, space.nel), 1)';
     dC_elem = - penal * (1 - Emin) * (rho_e .^ (penal - 1)) .* ce;
     
     % --- Step 5: Sensitivities Formulation & Filtering ---

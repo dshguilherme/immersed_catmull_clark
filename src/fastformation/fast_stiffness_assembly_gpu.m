@@ -1,11 +1,9 @@
-function [K, t_breakdown] = fast_stiffness_assembly_gpu(msh, space, geometry, YOUNG, POISSON, xPhys, penal, Emin, symmetrize)
+function [K, t_breakdown] = fast_stiffness_assembly_gpu(space, YOUNG, POISSON, xPhys, penal, Emin, symmetrize)
 % FAST_STIFFNESS_ASSEMBLY_GPU GPU-accelerated matrix formation for IGA Elasticity
 % utilizing NVIDIA CUDA hardware via MATLAB gpuArray and batched operations.
 %
 % Inputs:
-%   msh         - GeoPDEs mesh structure
-%   space       - GeoPDEs vector space structure
-%   geometry    - GeoPDEs geometry structure
+%   space       - displacement space on a box (see IGA_SPACE_BOX)
 %   YOUNG       - Young's modulus (E0)
 %   POISSON     - Poisson's ratio (nu)
 %   xPhys       - (Optional) Element density matrix
@@ -13,33 +11,24 @@ function [K, t_breakdown] = fast_stiffness_assembly_gpu(msh, space, geometry, YO
 %   Emin        - (Optional) Void modulus (default: 1e-9)
 %   symmetrize  - (Optional) Boolean flag (default: true)
 
-if nargin < 6 || isempty(xPhys), xPhys = []; end
-if nargin < 7 || isempty(penal), penal = 3; end
-if nargin < 8 || isempty(Emin), Emin = 1e-9; end
-if nargin < 9 || isempty(symmetrize), symmetrize = true; end
+if nargin < 4 || isempty(xPhys), xPhys = []; end
+if nargin < 5 || isempty(penal), penal = 3; end
+if nargin < 6 || isempty(Emin), Emin = 1e-9; end
+if nargin < 7 || isempty(symmetrize), symmetrize = true; end
 
 t_start = tic;
 
 %% 1. 1D Setup on CPU
 t_prep = tic;
-nsd = msh.ndim;
+nsd = space.dim;
 for idim = 1:nsd
-    sp1d = space.scalar_spaces{1}.sp_univ(idim);
-    Connectivity(idim).neighbors = cellfun(@(x) unique(sp1d.connectivity(:, x)).', sp1d.supp, 'UniformOutput', false);
+    Quad_rules(idim) = iga_wq_rules_1d(space.knots{idim}, space.degree(idim));
+    Connectivity(idim).neighbors = Quad_rules(idim).neighbors;
     Connectivity(idim).num_neigh = cellfun(@numel, Connectivity(idim).neighbors);
-    Quad_rules(idim) = quadrule_stiff_fast(sp1d);
-    brk{idim} = [space.scalar_spaces{1}.knots{idim}(1), space.scalar_spaces{1}.knots{idim}(end)];
     qn{idim} = Quad_rules(idim).all_points';
-end
-
-new_msh = msh_cartesian(brk, qn, [], geometry);
-space_wq = space.constructor(new_msh);
-
-for idim = 1:nsd
-    sp1d = space_wq.scalar_spaces{1}.sp_univ(idim);
-    for ii = 1:sp1d.ndof
-        BSval{idim, ii} = sp1d.shape_functions(Quad_rules(idim).ind_points{ii}, Connectivity(idim).neighbors{ii}).';
-        BSder{idim, ii} = sp1d.shape_function_gradients(Quad_rules(idim).ind_points{ii}, Connectivity(idim).neighbors{ii}).';
+    for ii = 1:space.ndof_dir(idim)
+        BSval{idim, ii} = Quad_rules(idim).B(Quad_rules(idim).ind_points{ii}, Connectivity(idim).neighbors{ii}).';
+        BSder{idim, ii} = Quad_rules(idim).dB(Quad_rules(idim).ind_points{ii}, Connectivity(idim).neighbors{ii}).';
     end
 end
 t_breakdown.prep = toc(t_prep);
@@ -47,34 +36,15 @@ t_breakdown.prep = toc(t_prep);
 %% 2. Metric and Constitutive Tensor on Device
 t_coeff = tic;
 aux_size = cellfun(@numel, qn);
-jac = msh.map_der(qn);
-
-if nsd == 3
-    E = zeros(6, 3, 3);
-    E(:, :, 1) = [1 0 0; 0 0 0; 0 0 0; 0 0 0; 0 0 1; 0 1 0];
-    E(:, :, 2) = [0 0 0; 0 1 0; 0 0 0; 0 0 1; 0 0 0; 1 0 0];
-    E(:, :, 3) = [0 0 0; 0 0 0; 0 0 1; 0 1 0; 0 0 1; 0 0 0];
-else
-    E = zeros(3, 2, 2);
-    E(:, :, 1) = [1 0; 0 0; 0 1];
-    E(:, :, 2) = [0 0; 0 1; 1 0];
-end
 
 lambda = YOUNG * POISSON / ((1 + POISSON) * (1 - 2 * POISSON));
 mu = YOUNG / (2 * (1 + POISSON));
-total_size = nchoosek(nsd + 2 - 1, 2);
-small_size = total_size - nsd;
-D1 = lambda * ones(nsd) + 2 * mu * eye(nsd);
-D2 = mu * eye(small_size);
-D0 = blkdiag(D1, D2);
-
-C = C_ijkl(E, jac, D0, nsd, aux_size);
+C = iga_wq_elasticity_tensor(space, lambda, mu, aux_size);
 
 if ~isempty(xPhys)
     e_idx = cell(1, nsd);
     for idim = 1:nsd
-        knots_u = unique(space.scalar_spaces{1}.knots{idim});
-        e_idx{idim} = discretize(qn{idim}, knots_u);
+        e_idx{idim} = discretize(qn{idim}, space.breaks{idim});
     end
     if nsd == 2
         rho_q = xPhys(e_idx{1}, e_idx{2});
@@ -108,8 +78,8 @@ t_breakdown.coeff = toc(t_coeff);
 
 %% 3. GPU Sum Factorization and Contractions
 t_sumfact = tic;
-N_dof = space.scalar_spaces{1}.ndof;
-n_size = space.scalar_spaces{1}.ndof_dir;
+N_dof = space.ndof_sc;
+n_size = space.ndof_dir;
 
 indices = cell(1, nsd);
 [indices{:}] = ind2sub(n_size, 1:N_dof);

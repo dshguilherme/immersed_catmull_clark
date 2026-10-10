@@ -1,40 +1,35 @@
-function S = wq_setup(msh, space, geometry, YOUNG, POISSON, device, precision)
+function S = wq_setup(space, YOUNG, POISSON, device, precision)
 % WQ_SETUP One-time (geometry-dependent) setup for batched weighted-quadrature
 % stiffness formation in 2D. Everything computed here is independent of the
 % design density and can be reused across all topology optimization iterations.
 %
+%   space     - displacement space on a 2D box (see IGA_SPACE_BOX)
 %   device    - 'cpu' or 'gpu'  (where the batched kernel will run)
 %   precision - 'double' (default) or 'single'
 %
 % The per-iteration work (SIMP scaling + row-wise sum factorization) is done
 % by WQ_FORM using the arrays stored in S.
 
-if nargin < 6 || isempty(device), device = 'gpu'; end
-if nargin < 7 || isempty(precision), precision = 'double'; end
-assert(msh.ndim == 2, 'wq_setup: only 2D is implemented.');
+if nargin < 4 || isempty(device), device = 'gpu'; end
+if nargin < 5 || isempty(precision), precision = 'double'; end
+assert(space.dim == 2, 'wq_setup: only 2D is implemented.');
 
 t_setup = tic;
 nsd = 2;
-sp_s = space.scalar_spaces{1};
-n = sp_s.ndof_dir;
+n = space.ndof_dir;
 N = prod(n);
 
 %% 1. Univariate WQ rules and basis evaluations (identical to fast_stiffness_assembly)
 for d = 1:nsd
-    sp1d = sp_s.sp_univ(d);
-    nb{d} = cellfun(@(x) unique(sp1d.connectivity(:, x)).', sp1d.supp, 'UniformOutput', false);
-    QR(d) = quadrule_stiff_fast(sp1d); %#ok<AGROW>
-    brk{d} = [sp_s.knots{d}(1), sp_s.knots{d}(end)];
+    QR(d) = iga_wq_rules_1d(space.knots{d}, space.degree(d)); %#ok<AGROW>
+    nb{d} = QR(d).neighbors;
     qn{d} = QR(d).all_points';
 end
-new_msh = msh_cartesian(brk, qn, [], geometry);
-space_wq = space.constructor(new_msh);
 nqtot = cellfun(@numel, qn);
 
 %% 2. Padded (basis x weight) arrays per direction and per weight type
 % Weight types: 1 = W00*B, 2 = W10*B, 3 = W01*B', 4 = W11*B'
 for d = 1:nsd
-    sp1d = space_wq.scalar_spaces{1}.sp_univ(d);
     nd = n(d);
     nnmax(d) = max(cellfun(@numel, nb{d}));
     nqmax(d) = max(QR(d).nquad_points);
@@ -49,8 +44,8 @@ for d = 1:nsd
         P{d}(1:nq, ii) = pts;
         J{d}(1:nn, ii) = ng;
         len{d}(ii) = nn;
-        Bv = sp1d.shape_functions(pts, ng).';
-        Bd = sp1d.shape_function_gradients(pts, ng).';
+        Bv = QR(d).B(pts, ng).';
+        Bd = QR(d).dB(pts, ng).';
         WB{d}(1:nn, 1:nq, ii, 1) = QR(d).quad_weights_00{ii} .* Bv;
         WB{d}(1:nn, 1:nq, ii, 2) = QR(d).quad_weights_10{ii} .* Bv;
         WB{d}(1:nn, 1:nq, ii, 3) = QR(d).quad_weights_01{ii} .* Bd;
@@ -62,14 +57,9 @@ end
 [I1, I2] = ind2sub(n, 1:N);
 
 %% 3. Metric / constitutive tensor C0 at all WQ points (density independent)
-jac = msh.map_der(qn);
-E = zeros(3, 2, 2);
-E(:, :, 1) = [1 0; 0 0; 0 1];
-E(:, :, 2) = [0 0; 0 1; 1 0];
 lambda = YOUNG * POISSON / ((1 + POISSON) * (1 - 2 * POISSON));
 mu = YOUNG / (2 * (1 + POISSON));
-D0 = blkdiag(lambda * ones(nsd) + 2 * mu * eye(nsd), mu);
-C = C_ijkl(E, jac, D0, nsd, nqtot);
+C = iga_wq_elasticity_tensor(space, lambda, mu, nqtot);
 
 % Gather index: for row n, local grid P1(:,I1(n)) x P2(:,I2(n)) -> [nq1 x nq2 x N]
 LIN = reshape(P{1}(:, I1), nqmax(1), 1, N) + ...
@@ -126,15 +116,10 @@ rows = ROWp(mask);
 cols = COLp(mask);
 
 %% 5. Density-to-WQ-point maps
-knots_u1 = unique(sp_s.knots{1});
-knots_u2 = unique(sp_s.knots{2});
-e1 = discretize(qn{1}, knots_u1);
-e2 = discretize(qn{2}, knots_u2);
-S1 = space_wq.scalar_spaces{1}.sp_univ(1).shape_functions;  % [nq1tot x ncp1]
-S2 = space_wq.scalar_spaces{1}.sp_univ(2).shape_functions;  % [nq2tot x ncp2]
-if ndims(S1) == 3, S1 = S1(:, :, 1); end
-if ndims(S2) == 3, S2 = S2(:, :, 1); end
-S1 = full(S1); S2 = full(S2);
+e1 = discretize(qn{1}, space.breaks{1});
+e2 = discretize(qn{2}, space.breaks{2});
+S1 = QR(1).B;  % [nq1tot x ncp1]
+S2 = QR(2).B;  % [nq2tot x ncp2]
 
 %% 6. Move density-independent arrays to the target device / precision
 cast_fn = @(x) cast(x, precision);

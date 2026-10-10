@@ -1,6 +1,4 @@
 % test_topopt_run.m
-addpath(genpath('C:\Users\dshgu\OneDrive\Documents\geopdes-master'));
-addpath('c:\Users\dshgu\OneDrive\Documents\FastFormation');
 
 fprintf('========================================================================\n');
 fprintf('  RUNNING HIGH-RESOLUTION IGA TOPOLOGY OPTIMIZATION EXPERIMENTS\n');

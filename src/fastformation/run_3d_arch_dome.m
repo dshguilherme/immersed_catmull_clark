@@ -3,8 +3,6 @@
 % Domain: [1.0 x 1.0 x 0.5], 40x40x20 elements (32,000 elements)
 % 4 bottom corners fixed, downward load at top-center
 clear; clc; close all;
-addpath(genpath('C:\Users\dshgu\OneDrive\Documents\geopdes-master'));
-addpath('C:\Users\dshgu\OneDrive\Documents\FastFormation');
 
 nelx = 40; nely = 40; nelz = 20;
 L = 1.0; w = 1.0; h = 0.5;
@@ -18,28 +16,12 @@ fprintf('  Mesh: %dx%dx%d (%d elements, %d DOFs) | VolFrac: %.2f\n', ...
 fprintf('========================================================================\n\n');
 
 %% 1. Geometry
-srf = nrb4surf([0 0 0], [L 0 0], [0 w 0], [L w 0]);
-vol = nrbextrude(srf, [0 0 h]);
-
-pdata.geo_name = vol;
-pdata.drchlt_sides = []; pdata.nmnn_sides = [];
-pdata.press_sides = [];  pdata.symm_sides = [];
-pdata.E = 1.0; pdata.nu = 0.3;
-pdata.lambda_lame = @(x,y,z) 0.5769 * ones(size(x));
-pdata.mu_lame     = @(x,y,z) 0.3846 * ones(size(x));
-
 p = 2;
-mdata.degree     = [p, p, p];
-mdata.regularity = [p-1, p-1, p-1];
-mdata.nsub       = [nelx, nely, nelz];
-mdata.nquad      = [p+1, p+1, p+1];
-
-[geo, msh, sp] = buildSpaces(pdata, mdata);
-sp_col = sp_precompute(sp, msh, 'gradient', false, 'divergence', false);
-conn_e = sp_col.connectivity;
-nel = msh.nel; nsh = sp_col.nsh_max; ndof = sp.ndof;
-ndof_sc = sp.scalar_spaces{1}.ndof;
-ncp_dir = sp.scalar_spaces{1}.ndof_dir;
+sp = iga_space_box([0 L; 0 w; 0 h], [nelx, nely, nelz], p);
+conn_e = sp.connectivity;
+nel = sp.nel; nsh = sp.nsh; ndof = sp.ndof;
+ndof_sc = sp.ndof_sc;
+ncp_dir = sp.ndof_dir;
 
 % 4 Bottom Corners Fixed
 [i1, i2, i3] = ind2sub(ncp_dir, 1:ndof_sc);
@@ -64,31 +46,9 @@ F(load_dofs_z) = -1.0 / numel(load_dofs_z);
 
 %% 2. Template Precomputation
 t_tmpl = tic;
-srf_tmpl = nrb4surf([0 0 0], [3*hx 0 0], [0 3*hy 0], [3*hx 3*hy 0]);
-pdata_t.geo_name = nrbextrude(srf_tmpl, [0 0 3*hz]);
-pdata_t.drchlt_sides = []; pdata_t.nmnn_sides = []; pdata_t.press_sides = []; pdata_t.symm_sides = [];
-pdata_t.E = 1.0; pdata_t.nu = 0.3;
-pdata_t.lambda_lame = @(x,y,z) 0.5769 * ones(size(x));
-pdata_t.mu_lame     = @(x,y,z) 0.3846 * ones(size(x));
-mdata_t.degree = [p, p, p]; mdata_t.regularity = [p-1, p-1, p-1];
-mdata_t.nsub = [3 3 3]; mdata_t.nquad = [p+1, p+1, p+1];
-[geo_t, msh_t, sp_t] = buildSpaces(pdata_t, mdata_t);
-sp_col_t = sp_precompute(sp_t, msh_t, 'gradient', true, 'divergence', true);
-msh_col_t = msh_precompute(msh_t);
-l_val_t = 0.5769 * ones(msh_t.nqn, msh_t.nel);
-m_val_t = 0.3846 * ones(msh_t.nqn, msh_t.nel);
-[rt, ct, vt] = op_su_ev(sp_col_t, sp_col_t, msh_col_t, l_val_t, m_val_t);
-ve_tmpl = single(reshape(vt, [nsh, nsh, 3, 3, 3]));
-
-[ix, iy, iz] = ind2sub([nelx, nely, nelz], 1:nel);
-tx = 2 * ones(1, nel); tx(ix == 1) = 1; tx(ix == nelx) = 3;
-ty = 2 * ones(1, nel); ty(iy == 1) = 1; ty(iy == nely) = 3;
-tz = 2 * ones(1, nel); tz(iz == 1) = 1; tz(iz == nelz) = 3;
-
-vals_e = zeros(nsh, nsh, nel, 'single');
-for e = 1:nel
-    vals_e(:, :, e) = ve_tmpl(:, :, tx(e), ty(e), tz(e));
-end
+[Ke_types, type_id] = iga_elasticity_element_matrices(sp, 0.5769, 0.3846);
+Ke_types = single(Ke_types);
+vals_e = Ke_types(:, :, type_id);
 fprintf('Template Precomputed in %.2f s\n', toc(t_tmpl));
 
 %% 3. Filter

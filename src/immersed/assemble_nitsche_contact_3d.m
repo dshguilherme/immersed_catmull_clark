@@ -98,10 +98,10 @@ h_contact = 0.5 * (hA + hB);
 penalty = opts.gamma_c / h_contact;
 
 % Spline space dimensions
-ncpA = spA.scalar_spaces{1}.ndof_dir;
-ndof_scA = spA.scalar_spaces{1}.ndof;
-ncpB = spB.scalar_spaces{1}.ndof_dir;
-ndof_scB = spB.scalar_spaces{1}.ndof;
+ncpA = spA.ndof_dir;
+ndof_scA = spA.ndof_sc;
+ncpB = spB.ndof_dir;
+ndof_scB = spB.ndof_sc;
 
 xgA = linspace(grid_boundsA(1,1), grid_boundsA(1,2), ncpA(1));
 ygA = linspace(grid_boundsA(2,1), grid_boundsA(2,2), ncpA(2));

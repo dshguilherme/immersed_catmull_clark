@@ -1,5 +1,4 @@
 % test_gpu_approaches.m
-addpath(genpath('C:\Users\dshgu\OneDrive\Documents\geopdes-master'));
 
 L = 1; h = 0.5;
 problem_data = cantilever_beam(L, h);

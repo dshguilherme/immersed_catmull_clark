@@ -4,8 +4,6 @@
 %   - per-iteration formation: kernel / extract / transfer / sparse, device-synchronized
 %   - median of nrep runs after one warm-up run
 clearvars; clc;
-addpath(genpath('C:\Users\dshgu\OneDrive\Documents\geopdes-master'));
-addpath('c:\Users\dshgu\OneDrive\Documents\FastFormation');
 
 p = 3; nrep = 5; penal = 3; Emin = 1e-3;
 nsub_list = {[20,10],[40,20],[80,40],[120,60],[160,80],[200,100],[260,130],[320,160]};
@@ -22,20 +20,18 @@ fprintf('%-10s %7s | %8s | %8s %8s | %8s %8s %8s | %8s\n', 'mesh', 'DOFs', 'RefL
     'CPUform', 'CPUkern', 'GPU64krn', 'GPU64e2e', 'GPU32krn', 'xfer64');
 for m = 1:nm
     nsub = nsub_list{m};
-    pd = cantilever_beam(1.0, 0.5);
-    md.degree = [p p]; md.regularity = [p-1 p-1]; md.nsub = nsub; md.nquad = [p+1 p+1];
-    [geometry, msh, sp] = buildSpaces(pd, md);
+    sp = iga_space_box([0 1.0; 0 0.5], nsub, p);
     R.dofs(m) = sp.ndof;
     x = rand(nsub);
 
     % Reference row-loop CPU implementation (the one used in the paper so far)
     if sp.ndof <= 70000
-        tic; fast_stiffness_assembly(msh, sp, geometry, 1.0, 0.3, x, 'element', penal, Emin, true);
+        tic; fast_stiffness_assembly(sp, 1.0, 0.3, x, 'element', penal, Emin, true);
         R.t_ref(m) = toc;
     end
 
     % ---- Batched CPU ----
-    Sc = wq_setup(msh, sp, geometry, 1.0, 0.3, 'cpu', 'double'); R.setup_cpu(m) = Sc.t_setup;
+    Sc = wq_setup(sp, 1.0, 0.3, 'cpu', 'double'); R.setup_cpu(m) = Sc.t_setup;
     wq_form(Sc, x, 'element', penal, Emin, true, 'cpu_sparse');
     T = zeros(nrep, 3);
     for r = 1:nrep
@@ -47,7 +43,7 @@ for m = 1:nm
 
     % ---- GPU FP64 ----
     try
-        Sg = wq_setup(msh, sp, geometry, 1.0, 0.3, 'gpu', 'double'); R.setup_gpu(m) = Sg.t_setup;
+        Sg = wq_setup(sp, 1.0, 0.3, 'gpu', 'double'); R.setup_gpu(m) = Sg.t_setup;
         wq_form(Sg, x, 'element', penal, Emin, true, 'cpu_sparse');
         T = zeros(nrep, 5);
         for r = 1:nrep
@@ -65,7 +61,7 @@ for m = 1:nm
 
     % ---- GPU FP32 ----
     try
-        Sg = wq_setup(msh, sp, geometry, 1.0, 0.3, 'gpu', 'single');
+        Sg = wq_setup(sp, 1.0, 0.3, 'gpu', 'single');
         wq_form(Sg, x, 'element', penal, Emin, true, 'values');
         T = zeros(nrep, 3);
         for r = 1:nrep

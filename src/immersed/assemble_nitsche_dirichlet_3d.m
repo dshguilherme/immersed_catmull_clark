@@ -21,8 +21,8 @@ if nargin < 6 || isempty(u_prescribed), u_prescribed = [0; 0; 0]; end
 if nargin < 7 || isempty(gamma_nitsche), gamma_nitsche = 20.0; end
 
 ndof = sp.ndof;
-ndof_sc = sp.scalar_spaces{1}.ndof;
-ncp_dir = sp.scalar_spaces{1}.ndof_dir;
+ndof_sc = sp.ndof_sc;
+ncp_dir = sp.ndof_dir;
 
 v1 = brep.nodes(brep.elements(:, 1), :);
 v2 = brep.nodes(brep.elements(:, 2), :);

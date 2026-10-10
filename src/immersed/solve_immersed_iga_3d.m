@@ -64,32 +64,14 @@ Lz = grid_bounds(3,2) - grid_bounds(3,1);
 hx = Lx / nelx; hy = Ly / nely; hz = Lz / nelz;
 h_cell = [hx, hy, hz];
 
-% 2. Build Background Spline Spaces
-srf = nrb4surf([grid_bounds(1,1), grid_bounds(2,1), grid_bounds(3,1)], ...
-              [grid_bounds(1,2), grid_bounds(2,1), grid_bounds(3,1)], ...
-              [grid_bounds(1,1), grid_bounds(2,2), grid_bounds(3,1)], ...
-              [grid_bounds(1,2), grid_bounds(2,2), grid_bounds(3,1)]);
-vol = nrbextrude(srf, [0, 0, Lz]);
-
-pdata.geo_name = vol;
-pdata.drchlt_sides = []; pdata.nmnn_sides = []; pdata.press_sides = []; pdata.symm_sides = [];
-pdata.E = E; pdata.nu = nu;
-pdata.lambda_lame = @(x,y,z) lambda * ones(size(x));
-pdata.mu_lame     = @(x,y,z) mu * ones(size(x));
-
+% 2. Build Background Spline Space
 p = opts.degree;
-mdata.degree     = [p, p, p];
-mdata.regularity = [p-1, p-1, p-1];
-mdata.nsub       = grid_res;
-mdata.nquad      = [p+1, p+1, p+1];
-
-[geo, msh, sp] = buildSpaces(pdata, mdata);
-sp_col = sp_precompute(sp, msh, 'gradient', false, 'divergence', false);
-conn_e = sp_col.connectivity;
-nsh = sp_col.nsh_max;
+sp = iga_space_box(grid_bounds, grid_res, p);
+conn_e = sp.connectivity;
+nsh = sp.nsh;
 ndof = sp.ndof;
-ndof_sc = sp.scalar_spaces{1}.ndof;
-ncp_dir = sp.scalar_spaces{1}.ndof_dir;
+ndof_sc = sp.ndof_sc;
+ncp_dir = sp.ndof_dir;
 
 % 3. Cut-Cell Quadrature and Classification
 [elem_weights, status] = assemble_immersed_element_weights(brep, grid_bounds, grid_res, [4, 4, 4]);
@@ -106,32 +88,10 @@ else
     diag_gp = zeros(ndof, 1);
 end
 
-% 5. FastFormation 3D Template Precomputation
-srf_tmpl = nrb4surf([0 0 0], [3*hx 0 0], [0 3*hy 0], [3*hx 3*hy 0]);
-pdata_t.geo_name = nrbextrude(srf_tmpl, [0 0 3*hz]);
-pdata_t.drchlt_sides = []; pdata_t.nmnn_sides = []; pdata_t.press_sides = []; pdata_t.symm_sides = [];
-pdata_t.E = E; pdata_t.nu = nu;
-pdata_t.lambda_lame = @(x,y,z) lambda * ones(size(x));
-pdata_t.mu_lame     = @(x,y,z) mu * ones(size(x));
-mdata_t.degree = [p, p, p]; mdata_t.regularity = [p-1, p-1, p-1];
-mdata_t.nsub = [3 3 3]; mdata_t.nquad = [p+1, p+1, p+1];
-[geo_t, msh_t, sp_t] = buildSpaces(pdata_t, mdata_t);
-sp_col_t = sp_precompute(sp_t, msh_t, 'gradient', true, 'divergence', true);
-msh_col_t = msh_precompute(msh_t);
-l_val_t = lambda * ones(msh_t.nqn, msh_t.nel);
-m_val_t = mu * ones(msh_t.nqn, msh_t.nel);
-[rt, ct, vt] = op_su_ev(sp_col_t, sp_col_t, msh_col_t, l_val_t, m_val_t);
-ve_tmpl = single(reshape(vt, [nsh, nsh, 3, 3, 3]));
-
-[ix, iy, iz] = ind2sub(grid_res, 1:nel);
-tx = 2 * ones(1, nel); tx(ix == 1) = 1; tx(ix == nelx) = 3;
-ty = 2 * ones(1, nel); ty(iy == 1) = 1; ty(iy == nely) = 3;
-tz = 2 * ones(1, nel); tz(iz == 1) = 1; tz(iz == nelz) = 3;
-
-vals_e = zeros(nsh, nsh, nel, 'single');
-for e = 1:nel
-    vals_e(:, :, e) = ve_tmpl(:, :, tx(e), ty(e), tz(e));
-end
+% 5. Element Stiffness (exact per element type, any degree)
+[Ke_types, type_id] = iga_elasticity_element_matrices(sp, lambda, mu);
+Ke_types = single(Ke_types);
+vals_e = Ke_types(:, :, type_id);
 
 % 6. Boundary Conditions
 [i1, i2, i3] = ind2sub(ncp_dir, 1:ndof_sc);
@@ -280,8 +240,6 @@ sol.cell_status = status;
 sol.grid_bounds = grid_bounds;
 sol.grid_res = grid_res;
 sol.sp = sp;
-sol.geo = geo;
-sol.msh = msh;
 sol.conn_e = conn_e;
 sol.u_on_brep = u_on_brep;
 sol.K_gp = K_gp;

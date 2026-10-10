@@ -1,13 +1,11 @@
-function [K, t_breakdown] = fast_stiffness_assembly(msh, space, geometry, YOUNG, POISSON, xPhys, density_type, penal, Emin, symmetrize, sp_rho)
+function [K, t_breakdown] = fast_stiffness_assembly(space, YOUNG, POISSON, xPhys, density_type, penal, Emin, symmetrize, sp_rho)
 % FAST_STIFFNESS_ASSEMBLY High-Performance IGA Stiffness Formation
 % Supports both:
 %   - 'element' : Piecewise-constant element density xPhys (size [nel_x, nel_y])
 %   - 'spline'  : Continuous B-spline control net density xPhys (size [ncp_x, ncp_y])
 %
 % Inputs:
-%   msh          - GeoPDEs mesh
-%   space        - GeoPDEs vector space (displacement)
-%   geometry     - GeoPDEs geometry
+%   space        - displacement space on a box (see IGA_SPACE_BOX)
 %   YOUNG        - Base Young's modulus E0
 %   POISSON      - Poisson's ratio nu
 %   xPhys        - Density array (element-wise or control point values in [0, 1])
@@ -15,37 +13,29 @@ function [K, t_breakdown] = fast_stiffness_assembly(msh, space, geometry, YOUNG,
 %   penal        - SIMP penalization exponent (default: 3)
 %   Emin         - Minimum void relative modulus (default: 1e-9)
 %   symmetrize   - Boolean flag to enforce self-adjoint symmetry (default: true)
-%   sp_rho       - (Optional) Scalar B-spline space for density field if type='spline'
+%   sp_rho       - (Optional) space for the density field if type='spline'
+%                  (default: the displacement space; see IGA_SPACE_BOX)
 
-if nargin < 6 || isempty(xPhys), xPhys = []; end
-if nargin < 7 || isempty(density_type), density_type = 'element'; end
-if nargin < 8 || isempty(penal), penal = 3; end
-if nargin < 9 || isempty(Emin), Emin = 1e-9; end
-if nargin < 10 || isempty(symmetrize), symmetrize = true; end
-if nargin < 11, sp_rho = []; end
+if nargin < 4 || isempty(xPhys), xPhys = []; end
+if nargin < 5 || isempty(density_type), density_type = 'element'; end
+if nargin < 6 || isempty(penal), penal = 3; end
+if nargin < 7 || isempty(Emin), Emin = 1e-9; end
+if nargin < 8 || isempty(symmetrize), symmetrize = true; end
+if nargin < 9 || isempty(sp_rho), sp_rho = space; end
 
 t_start = tic;
-nsd = msh.ndim;
+nsd = space.dim;
 
 %% 1. 1D Setup
 t_prep = tic;
 for idim = 1:nsd
-    sp1d = space.scalar_spaces{1}.sp_univ(idim);
-    Connectivity(idim).neighbors = cellfun(@(x) unique(sp1d.connectivity(:, x)).', sp1d.supp, 'UniformOutput', false);
+    Quad_rules(idim) = iga_wq_rules_1d(space.knots{idim}, space.degree(idim));
+    Connectivity(idim).neighbors = Quad_rules(idim).neighbors;
     Connectivity(idim).num_neigh = cellfun(@numel, Connectivity(idim).neighbors);
-    Quad_rules(idim) = quadrule_stiff_fast(sp1d);
-    brk{idim} = [space.scalar_spaces{1}.knots{idim}(1), space.scalar_spaces{1}.knots{idim}(end)];
     qn{idim} = Quad_rules(idim).all_points';
-end
-
-new_msh = msh_cartesian(brk, qn, [], geometry);
-space_wq = space.constructor(new_msh);
-
-for idim = 1:nsd
-    sp1d = space_wq.scalar_spaces{1}.sp_univ(idim);
-    for ii = 1:sp1d.ndof
-        BSval{idim, ii} = sp1d.shape_functions(Quad_rules(idim).ind_points{ii}, Connectivity(idim).neighbors{ii}).';
-        BSder{idim, ii} = sp1d.shape_function_gradients(Quad_rules(idim).ind_points{ii}, Connectivity(idim).neighbors{ii}).';
+    for ii = 1:space.ndof_dir(idim)
+        BSval{idim, ii} = Quad_rules(idim).B(Quad_rules(idim).ind_points{ii}, Connectivity(idim).neighbors{ii}).';
+        BSder{idim, ii} = Quad_rules(idim).dB(Quad_rules(idim).ind_points{ii}, Connectivity(idim).neighbors{ii}).';
     end
 end
 t_breakdown.prep = toc(t_prep);
@@ -53,36 +43,17 @@ t_breakdown.prep = toc(t_prep);
 %% 2. Metric Tensor & SIMP Scaling
 t_coeff = tic;
 aux_size = cellfun(@numel, qn);
-jac = msh.map_der(qn);
-
-if nsd == 3
-    E = zeros(6, 3, 3);
-    E(:, :, 1) = [1 0 0; 0 0 0; 0 0 0; 0 0 0; 0 0 1; 0 1 0];
-    E(:, :, 2) = [0 0 0; 0 1 0; 0 0 0; 0 0 1; 0 0 0; 1 0 0];
-    E(:, :, 3) = [0 0 0; 0 0 0; 0 0 1; 0 1 0; 0 0 1; 0 0 0];
-else
-    E = zeros(3, 2, 2);
-    E(:, :, 1) = [1 0; 0 0; 0 1];
-    E(:, :, 2) = [0 0; 0 1; 1 0];
-end
 
 lambda = YOUNG * POISSON / ((1 + POISSON) * (1 - 2 * POISSON));
 mu = YOUNG / (2 * (1 + POISSON));
-total_size = nchoosek(nsd + 2 - 1, 2);
-small_size = total_size - nsd;
-D1 = lambda * ones(nsd) + 2 * mu * eye(nsd);
-D2 = mu * eye(small_size);
-D0 = blkdiag(D1, D2);
-
-C = C_ijkl(E, jac, D0, nsd, aux_size);
+C = iga_wq_elasticity_tensor(space, lambda, mu, aux_size);
 
 if ~isempty(xPhys)
     if strcmpi(density_type, 'element')
         % Option A: Piecewise constant element density
         e_idx = cell(1, nsd);
         for idim = 1:nsd
-            knots_u = unique(space.scalar_spaces{1}.knots{idim});
-            e_idx{idim} = discretize(qn{idim}, knots_u);
+            e_idx{idim} = discretize(qn{idim}, space.breaks{idim});
         end
         if nsd == 2
             rho_q = xPhys(e_idx{1}, e_idx{2});
@@ -91,22 +62,16 @@ if ~isempty(xPhys)
         end
     else
         % Option B: Continuous B-spline density field
-        if isempty(sp_rho)
-            sp_rho_wq = space_wq.scalar_spaces{1};
-        else
-            sp_rho_wq = sp_rho.constructor(new_msh);
+        Srho = cell(1, nsd);
+        for idim = 1:nsd
+            Srho{idim} = iga_bspline_basis(sp_rho.knots{idim}, sp_rho.degree(idim), qn{idim});
         end
         if nsd == 2
-            sp1 = sp_rho_wq.sp_univ(1);
-            sp2 = sp_rho_wq.sp_univ(2);
-            rho_q = sp1.shape_functions * xPhys * (sp2.shape_functions');
+            rho_q = Srho{1} * xPhys * (Srho{2}');
         elseif nsd == 3
-            sp1 = sp_rho_wq.sp_univ(1);
-            sp2 = sp_rho_wq.sp_univ(2);
-            sp3 = sp_rho_wq.sp_univ(3);
-            rho_q = tprod__(sp1.shape_functions, xPhys, 1);
-            rho_q = tprod__(sp2.shape_functions, rho_q, 2);
-            rho_q = tprod__(sp3.shape_functions, rho_q, 3);
+            rho_q = tensor_mode_product(Srho{1}, xPhys, 1);
+            rho_q = tensor_mode_product(Srho{2}, rho_q, 2);
+            rho_q = tensor_mode_product(Srho{3}, rho_q, 3);
         end
     end
     
@@ -130,8 +95,8 @@ t_breakdown.coeff = toc(t_coeff);
 
 %% 3. Sum Factorization
 t_sumfact = tic;
-N_dof = space.scalar_spaces{1}.ndof;
-n_size = space.scalar_spaces{1}.ndof_dir;
+N_dof = space.ndof_sc;
+n_size = space.ndof_dir;
 
 indices = cell(1, nsd);
 [indices{:}] = ind2sub(n_size, 1:N_dof);
@@ -215,7 +180,7 @@ for ii = 1:N_dof
                 elseif nsd == 3
                     for i = 1:nsd
                         for j = 1:nsd
-                            C_blocks{i, j} = tprod__(B, C_blocks{i, j}, ll);
+                            C_blocks{i, j} = tensor_mode_product(B, C_blocks{i, j}, ll);
                         end
                     end
                 end
@@ -267,4 +232,13 @@ if symmetrize
 end
 t_breakdown.sparse = toc(t_sparse);
 t_breakdown.total = toc(t_start);
+end
+
+function Y = tensor_mode_product(A, X, d)
+% Mode-d product of a 3D array X with matrix A: contracts dimension d of X with the columns of A.
+sz = size(X, 1:3);
+perm = [d, setdiff(1:3, d)];
+Xd = reshape(permute(X, perm), sz(d), []);
+sz_out = sz; sz_out(d) = size(A, 1);
+Y = ipermute(reshape(A * Xd, sz_out(perm)), perm);
 end

@@ -3,8 +3,6 @@
 % Shows that Fast Formation produces the exact same Galerkin matrix up to machine precision.
 
 clearvars; clc; close all;
-addpath(genpath('C:\Users\dshgu\OneDrive\Documents\geopdes-master'));
-addpath('c:\Users\dshgu\OneDrive\Documents\FastFormation');
 
 fprintf('========================================================================\n');
 fprintf('  COMPARISON 1: Frobenius Norm Difference (Normal vs Fast Assembly)\n');
@@ -23,19 +21,16 @@ for p = degrees
     for i_m = 1:numel(nsub_list)
         nsub = nsub_list{i_m};
         
-        problem_data = cantilever_beam(1.0, 0.5);
-        method_data.degree     = [p, p];
-        method_data.regularity = [p-1, p-1];
-        method_data.nsub       = nsub;
-        method_data.nquad      = [p+1, p+1];
-        
-        [geometry, msh, sp] = buildSpaces(problem_data, method_data);
-        
-        % 1. Standard GeoPDEs Tensor-Product Assembly (Full Gauss)
-        K_normal = op_su_ev_tp(sp, sp, msh, problem_data.lambda_lame, problem_data.mu_lame);
-        
+        sp = iga_space_box([0 1.0; 0 0.5], nsub, p);
+
+        % 1. Standard Galerkin matrix (exact (p+1)-point Gauss; validated against
+        %    GeoPDEs op_su_ev to machine precision in tests/testIgaKernel.m)
+        [Ke, type_id] = iga_elasticity_element_matrices(sp, 0.3 / (1.3 * 0.4), 1 / 2.6);
+        [r, c] = iga_element_rows_cols(sp.connectivity);
+        K_normal = sparse(r, c, reshape(Ke(:, :, type_id), [], 1), sp.ndof, sp.ndof);
+
         % 2. Fast Formed Assembly (Row Weighted Quadrature + Sum Factorization)
-        K_fast = fast_stiffness_assembly(msh, sp, geometry, 1.0, 0.3, [], 3, 1e-9, true);
+        K_fast = fast_stiffness_assembly(sp, 1.0, 0.3, [], 'element', 3, 1e-9, true);
         
         % Compute difference metrics
         norm_normal = norm(K_normal, 'fro');

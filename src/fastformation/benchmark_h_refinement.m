@@ -3,8 +3,6 @@
 % Includes random xPhys array and extrapolation for large DOF counts.
 
 clearvars; clc; close all;
-addpath(genpath('C:\Users\dshgu\OneDrive\Documents\geopdes-master'));
-addpath('c:\Users\dshgu\OneDrive\Documents\FastFormation');
 
 fprintf('========================================================================\n');
 fprintf('  COMPARISON 2: Assembly Timing vs h-Refinement (p = 3 fixed)\n');
@@ -28,46 +26,39 @@ fprintf('%-12s %-10s %-12s %-14s %-14s %-14s\n', ...
 fprintf('%s\n', repmat('-', 1, 80));
 
 rng(42); % Reproducible random seed
+addpath(fullfile(fileparts(mfilename('fullpath')), '..', '..', 'benchmarks'));
+lambda = 0.3 / (1.3 * 0.4); mu = 1 / 2.6;   % E = 1, nu = 0.3
 
 for i = 1:numel(nsub_list)
     nsub = nsub_list{i};
     
-    problem_data = cantilever_beam(1.0, 0.5);
-    method_data.degree     = [p, p];
-    method_data.regularity = [p-1, p-1];
-    method_data.nsub       = nsub;
-    method_data.nquad      = [p+1, p+1];
-    
-    [geometry, msh, sp] = buildSpaces(problem_data, method_data);
-    
+    sp = iga_space_box([0 1.0; 0 0.5], nsub, p);
+
     h_dofs(i) = sp.ndof;
-    h_nel(i)  = msh.nel;
-    
+    h_nel(i)  = sp.nel;
+
     % Random physical density array
     xPhys = rand(nsub(1), nsub(2));
-    
-    % 1. Normal GeoPDEs Tensor-Product Assembly (measured for i <= max_normal_mesh_idx)
+
+    % 1. Normal GeoPDEs Tensor-Product Assembly (external reference, measured for
+    %    i <= max_normal_mesh_idx; NaN when GeoPDEs is not available)
     if i <= max_normal_mesh_idx
-        tic;
-        K_norm = op_su_ev_tp(sp, sp, msh, problem_data.lambda_lame, problem_data.mu_lame);
-        t_normal(i) = toc;
+        t_normal(i) = geopdes_gauss_baseline([0 1.0; 0 0.5], nsub, p, lambda, mu);
     else
         t_normal(i) = NaN; % Will be extrapolated
     end
-    
+
     % 2. Fast CPU Assembly
     tic;
-    K_f = fast_stiffness_assembly(msh, sp, geometry, 1.0, 0.3, xPhys, 'element', 3, 1e-3, true);
+    K_f = fast_stiffness_assembly(sp, 1.0, 0.3, xPhys, 'element', 3, 1e-3, true);
     t_fast(i) = toc;
-    
+
     % 3. Fast GPU Assembly (vectorized device kernel)
     tic;
-    sp_col = sp_precompute(sp, msh, 'gradient', true, 'divergence', true);
-    msh_col = msh_precompute(msh);
-    l_val = problem_data.lambda_lame(0, 0) * ones(msh.nqn, msh.nel);
-    m_val = problem_data.mu_lame(0, 0) * ones(msh.nqn, msh.nel);
-    [rows, cols, vals0] = op_su_ev(sp_col, sp_col, msh_col, l_val, m_val);
-    n_per_el = sp_col.nsh_max^2;
+    [Ke, type_id] = iga_elasticity_element_matrices(sp, lambda, mu);
+    [rows, cols] = iga_element_rows_cols(sp.connectivity);
+    vals0 = reshape(Ke(:, :, type_id), [], 1);
+    n_per_el = sp.nsh^2;
     scale = repelem(1e-3 + (1 - 1e-3)*(xPhys(:).^3), n_per_el);
     vals0_g = gpuArray(vals0); scale_g = gpuArray(scale);
     vals_g = vals0_g .* scale_g;
@@ -85,7 +76,11 @@ for i = 1:numel(nsub_list)
 end
 
 % Fit power-law curve to measured normal assembly points: t = a * DOFs^b
-measured_idx = 1:max_normal_mesh_idx;
+measured_idx = find(~isnan(t_normal(1:max_normal_mesh_idx)));
+if numel(measured_idx) < 2
+    warning('benchmark_h_refinement: GeoPDEs baseline not available; normal-assembly curve skipped.');
+    measured_idx = 1:max_normal_mesh_idx; t_normal(measured_idx) = NaN;
+end
 poly_fit = polyfit(log10(h_dofs(measured_idx)), log10(t_normal(measured_idx)), 1);
 b_power = poly_fit(1);
 a_power = 10^poly_fit(2);
