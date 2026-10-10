@@ -1,143 +1,78 @@
-use immersed_iga::*;
+//! Verification run of the Rust stack. Every check compares a computed quantity with
+//! a known answer under a stated tolerance; capabilities that are not ported yet are
+//! reported as such instead of passing. MATLAB parity is covered by `cargo test`
+//! (tests/*_vs_matlab.rs).
+
+use immersed_iga::immersed::Stabilization;
+use immersed_iga::verification::{immersed_cantilever, manufactured_solution_errors, patch_test};
 use std::time::Instant;
+
+enum Outcome {
+    Pass,
+    Fail,
+    NotPorted,
+}
 
 fn main() {
     println!("========================================================================");
-    println!("  RUNNING IMMERSED CATMULL-CLARK IGA BENCHMARK SUITE (RUST NATIVE)      ");
+    println!("  IMMERSED IGA (RUST) VERIFICATION RUN");
     println!("========================================================================");
+    let t0 = Instant::now();
+    let mut results: Vec<(&str, Outcome, String)> = Vec::new();
+
+    // 1. Patch test (exact reproduction of linear fields), 3D, p = 2 and 3
+    let e2 = patch_test(&[[0.0, 2.0], [0.0, 1.0], [0.0, 1.0]], &[4, 3, 3], 2);
+    let e3 = patch_test(&[[0.0, 1.0], [0.0, 2.0], [0.5, 1.0]], &[3, 4, 3], 3);
+    let ok = e2 < 1e-10 && e3 < 1e-10;
+    results.push(("3D elasticity patch test (p = 2, 3)", if ok { Outcome::Pass } else { Outcome::Fail }, format!("rel. errors {:.1e}, {:.1e} (tol 1e-10)", e2, e3)));
+
+    // 2. Manufactured solution: optimal L2 rate p + 1
+    let mut msg = String::new();
+    let mut ok = true;
+    for p in [2usize, 3] {
+        let err = manufactured_solution_errors(p, &[4, 8, 16]);
+        let rate = (err[1] / err[2]).log2();
+        ok &= rate > p as f64 + 1.0 - 0.25;
+        msg += &format!("p={}: rate {:.2} (expect {}); ", p, rate, p + 1);
+    }
+    results.push(("Manufactured solution, L2 convergence rate", if ok { Outcome::Pass } else { Outcome::Fail }, msg));
+
+    // 3. Immersed cantilever vs Timoshenko beam theory (ghost penalty)
+    let (d, t, it) = immersed_cantilever([44, 6, 6], Stabilization::GhostPenalty { gamma: 1e-2 });
+    let rel = (d - t) / t;
+    results.push((
+        "Immersed cantilever tip deflection vs Timoshenko",
+        if rel.abs() < 0.05 { Outcome::Pass } else { Outcome::Fail },
+        format!("{:+.2}% (tol 5%), {} PCG iterations", 100.0 * rel, it),
+    ));
+
+    // 4-6. Not ported yet
+    results.push(("Unilateral contact (active set) vs Hertz", Outcome::NotPorted, "contact solver not ported; MATLAB version unverified (docs/PORT_STATUS.md)".into()));
+    results.push(("Adaptive octree refinement: convergence rate", Outcome::NotPorted, "octree MPC solve and AMR loop not ported".into()));
+    results.push(("Multi-body CAD assembly", Outcome::NotPorted, "multi-body coupling not ported".into()));
+
     println!();
-
-    let start_total = Instant::now();
-
-    // -------------------------------------------------------------------------
-    // OBSTACLE 1: 3D Patch Test & Multi-Point Constraint Octree
-    // -------------------------------------------------------------------------
-    println!("[OBSTACLE 1/5] Running 3D Elasticity Patch Test & 2:1 Balanced Octree...");
-    let root_bounds = BoundingBox3D::new([0.0, 0.0, 0.0], [2.0, 2.0, 2.0]);
-    let mut octree = OctreeMesh3D::new(root_bounds, [2, 2, 2]);
-    octree.subdivide_cell(0);
-    octree.subdivide_cell(3);
-    octree.balance_2_to_1();
-
-    let mesh = StructuralMesh3D::from_octree(&octree);
-    let patch_err = mesh.evaluate_patch_test_error();
-
-    println!(
-        "  --> Obstacle 1: PASSED (Leaves: {}, Master DOFs: {}, Patch Test Error: {:.4e})",
-        mesh.n_elements,
-        3 * mesh.n_master,
-        patch_err
-    );
-    assert!(patch_err < 1e-14, "Obstacle 1 failed patch test tolerance");
-
-    // -------------------------------------------------------------------------
-    // OBSTACLE 2: Hertzian Contact Active-Set Profile
-    // -------------------------------------------------------------------------
-    println!("[OBSTACLE 2/5] Running Analytical Hertzian Contact Profile Benchmark...");
-    let contact_solver = ActiveSetContactSolver::new(20, 1.0e6);
-    let initial_gaps = vec![0.0, 0.0, 0.01, 0.05, 0.1];
-    let u_a = vec![0.0; 5];
-    let u_b = vec![-0.005, -0.002, 0.0, 0.0, 0.0]; // Negative = pushing into base
-
-    let (active, gaps, pressures) = contact_solver.evaluate_active_set(&initial_gaps, &u_a, &u_b);
-    let active_count = active.iter().filter(|&&a| a).count();
-
-    println!(
-        "  --> Obstacle 2: PASSED (Active Pairs: {}/5, Min Gap: {:.4e}, Peak Pressure: {:.2} MPa)",
-        active_count,
-        gaps.iter().cloned().fold(f64::INFINITY, f64::min),
-        pressures.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
-    );
-    assert_eq!(active_count, 2, "Obstacle 2 failed active pair detection");
-
-    // -------------------------------------------------------------------------
-    // OBSTACLE 3: Adaptive Mesh Refinement (AMR) Stress Riser
-    // -------------------------------------------------------------------------
-    println!("[OBSTACLE 3/5] Running Singular Stress Riser with Adaptive Octree AMR...");
-    let l_bounds = BoundingBox3D::new([-0.5, -0.5, -0.2], [4.5, 4.5, 1.2]);
-    let mut amr_octree = OctreeMesh3D::new(l_bounds, [2, 2, 1]);
-    let initial_leaves = amr_octree.leaf_indices().len();
-
-    // Refine around singular corner (2.0, 2.0, 0.5)
-    let corner = [2.0, 2.0, 0.5];
-    for _ in 0..2 {
-        let leaves = amr_octree.leaf_indices();
-        for leaf_idx in leaves {
-            if amr_octree.cells[leaf_idx].bounds.contains_point(&corner, 0.5) {
-                amr_octree.subdivide_cell(leaf_idx);
+    let (mut n_pass, mut n_fail, mut n_np) = (0, 0, 0);
+    for (name, outcome, detail) in &results {
+        let tag = match outcome {
+            Outcome::Pass => {
+                n_pass += 1;
+                "PASS      "
             }
-        }
-        amr_octree.balance_2_to_1();
+            Outcome::Fail => {
+                n_fail += 1;
+                "FAIL      "
+            }
+            Outcome::NotPorted => {
+                n_np += 1;
+                "NOT PORTED"
+            }
+        };
+        println!("  [{}] {:<48} {}", tag, name, detail);
     }
-    let final_leaves = amr_octree.leaf_indices().len();
-
-    println!(
-        "  --> Obstacle 3: PASSED (AMR Hierarchy: Initial Leaves = {} -> Refined Leaves = {})",
-        initial_leaves,
-        final_leaves
-    );
-    assert!(final_leaves > initial_leaves, "Obstacle 3 failed AMR progression");
-
-    // -------------------------------------------------------------------------
-    // OBSTACLE 4: In-House Pure Cox-de Boor Basis & Catmull-Clark Projection
-    // -------------------------------------------------------------------------
-    println!("[OBSTACLE 4/5] Running In-House Cox-de Boor B-Spline Basis & Partition of Unity...");
-    let degree = 3; // Cubic
-    let nel = 8;
-    let knots = open_knot_vector(nel, degree);
-    let eval_points = vec![0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0];
-    let basis = evaluate_bspline_basis_1d(degree, &knots, &eval_points);
-
-    let mut max_pou_err: f64 = 0.0;
-    for row in &basis {
-        let sum: f64 = row.iter().sum();
-        let err = (sum - 1.0).abs();
-        if err > max_pou_err {
-            max_pou_err = err;
-        }
+    println!("------------------------------------------------------------------------");
+    println!("  {} passed, {} failed, {} not ported ({:.1} s)", n_pass, n_fail, n_np, t0.elapsed().as_secs_f64());
+    if n_fail > 0 {
+        std::process::exit(1);
     }
-
-    println!(
-        "  --> Obstacle 4: PASSED (Degree: {}, Knots: {}, Max Partition-of-Unity Error: {:.4e})",
-        degree,
-        knots.len(),
-        max_pou_err
-    );
-    assert!(max_pou_err < 1e-14, "Obstacle 4 failed partition of unity");
-
-    // -------------------------------------------------------------------------
-    // OBSTACLE 5: Matrix-Free PCG Solver Scalability
-    // -------------------------------------------------------------------------
-    println!("[OBSTACLE 5/5] Running Native Matrix-Free PCG Convergence Benchmark...");
-    let pcg = PcgSolver::new(100, 1e-6);
-    let n_dof = 1000;
-    let b = vec![1.0; n_dof];
-    let diag_a = vec![4.0; n_dof];
-
-    // Tridiagonal Laplacian-like stencil: (A*p)_i = -p_{i-1} + 4*p_i - p_{i+1}
-    let matvec = |p: &[f64], ap: &mut [f64]| {
-        for i in 0..n_dof {
-            let left = if i > 0 { p[i - 1] } else { 0.0 };
-            let right = if i + 1 < n_dof { p[i + 1] } else { 0.0 };
-            ap[i] = 4.0 * p[i] - left - right;
-        }
-    };
-
-    let t_pcg = Instant::now();
-    let (_x, iters, res) = pcg.solve(n_dof, &b, &diag_a, matvec);
-    let pcg_time = t_pcg.elapsed();
-
-    println!(
-        "  --> Obstacle 5: PASSED (DOFs: {}, PCG Iters: {}, Rel Residual: {:.4e}, Time: {:?})",
-        n_dof,
-        iters,
-        res,
-        pcg_time
-    );
-    assert!(res < 1e-6, "Obstacle 5 failed PCG convergence");
-
-    println!();
-    println!("========================================================================");
-    println!("  ALL 5 RUST OBSTACLES PASSED SUCCESSFULLY (Total Time: {:?})", start_total.elapsed());
-    println!("========================================================================");
 }
