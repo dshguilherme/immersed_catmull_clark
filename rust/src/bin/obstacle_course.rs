@@ -1,7 +1,7 @@
 //! Verification run of the Rust stack. Every check compares a computed quantity with
-//! a known answer under a stated tolerance; capabilities that are not ported yet are
-//! reported as such instead of passing. MATLAB parity is covered by `cargo test`
-//! (tests/*_vs_matlab.rs).
+//! a known answer under a stated tolerance. Capabilities that are ported (with MATLAB
+//! parity, see `cargo test` / tests/*_vs_matlab.rs) but have no analytical check yet are
+//! reported as UNVERIFIED instead of passing.
 
 use immersed_iga::immersed::Stabilization;
 use immersed_iga::verification::{immersed_cantilever, manufactured_solution_errors, patch_test};
@@ -10,7 +10,8 @@ use std::time::Instant;
 enum Outcome {
     Pass,
     Fail,
-    NotPorted,
+    /// Ported with MATLAB parity (cargo test), but no analytical verification exists yet.
+    NotVerified,
 }
 
 fn main() {
@@ -46,13 +47,13 @@ fn main() {
         format!("{:+.2}% (tol 5%), {} PCG iterations", 100.0 * rel, it),
     ));
 
-    // 4-6. Not ported yet
-    results.push(("Unilateral contact (active set) vs Hertz", Outcome::NotPorted, "contact solver not ported; MATLAB version unverified (docs/PORT_STATUS.md)".into()));
-    results.push(("Adaptive octree refinement: convergence rate", Outcome::NotPorted, "octree MPC solve and AMR loop not ported".into()));
-    results.push(("Multi-body CAD assembly", Outcome::NotPorted, "multi-body coupling not ported".into()));
+    // 4-6. Ported with MATLAB parity, but not verified against analytical solutions
+    results.push(("Unilateral contact (active set) vs Hertz", Outcome::NotVerified, "ported (contact.rs, MATLAB parity); needs a contact patch test / real Hertz problem".into()));
+    results.push(("Adaptive octree refinement: convergence rate", Outcome::NotVerified, "ported (amr.rs, MATLAB parity); indicator is a stress heuristic, rate not measured".into()));
+    results.push(("Multi-body CAD assembly", Outcome::NotVerified, "ported (contact.rs bonded mode); needs a tied patch test".into()));
 
     println!();
-    let (mut n_pass, mut n_fail, mut n_np) = (0, 0, 0);
+    let (mut n_pass, mut n_fail, mut n_nv) = (0, 0, 0);
     for (name, outcome, detail) in &results {
         let tag = match outcome {
             Outcome::Pass => {
@@ -63,15 +64,15 @@ fn main() {
                 n_fail += 1;
                 "FAIL      "
             }
-            Outcome::NotPorted => {
-                n_np += 1;
-                "NOT PORTED"
+            Outcome::NotVerified => {
+                n_nv += 1;
+                "UNVERIFIED"
             }
         };
         println!("  [{}] {:<48} {}", tag, name, detail);
     }
     println!("------------------------------------------------------------------------");
-    println!("  {} passed, {} failed, {} not ported ({:.1} s)", n_pass, n_fail, n_np, t0.elapsed().as_secs_f64());
+    println!("  {} passed, {} failed, {} unverified ({:.1} s)", n_pass, n_fail, n_nv, t0.elapsed().as_secs_f64());
     if n_fail > 0 {
         std::process::exit(1);
     }
