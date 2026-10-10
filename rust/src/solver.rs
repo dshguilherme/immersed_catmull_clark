@@ -42,7 +42,9 @@ impl PcgSolver {
             matvec(&p, &mut ap);
 
             let p_ap: f64 = p.iter().zip(ap.iter()).map(|(pi, api)| pi * api).sum();
-            if p_ap.abs() < 1e-20 {
+            // Breakdown only if the search direction carries no energy (p = 0, or A not SPD).
+            // An absolute threshold here would stop early on small-magnitude systems.
+            if !(p_ap > 0.0) {
                 break;
             }
 
