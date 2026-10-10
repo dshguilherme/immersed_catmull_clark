@@ -49,6 +49,59 @@ pub fn scalar_basis_at(sp: &SpaceBox, x: &[f64; 3]) -> Vec<(usize, f64)> {
         .collect()
 }
 
+/// Accumulates surface stiffness per background element (all quadrature points that see
+/// the same set of basis functions share one dense local block), which keeps memory
+/// proportional to the number of cut elements instead of the number of surface points.
+#[derive(Default)]
+struct SurfaceAccumulator {
+    blocks: std::collections::HashMap<usize, (Vec<usize>, Vec<f64>)>,
+}
+
+impl SurfaceAccumulator {
+    /// Adds `w * K_s[ci][cj] * N_a N_b` for the basis functions `nz` at one point.
+    fn add(&mut self, nz: &[(usize, f64)], ks: [[f64; 3]; 3], w: f64) {
+        let n = nz.len();
+        let key = nz[0].0; // first function identifies the element support
+        let entry = self.blocks.entry(key).or_insert_with(|| (nz.iter().map(|x| x.0).collect(), vec![0.0; 9 * n * n]));
+        let m = &mut entry.1;
+        for ci in 0..3 {
+            for cj in 0..3 {
+                let k = ks[ci][cj] * w;
+                if k == 0.0 {
+                    continue;
+                }
+                for a in 0..n {
+                    let ka = k * nz[a].1;
+                    let row = (ci * n + a) * 3 * n + cj * n;
+                    for b in 0..n {
+                        m[row + b] += ka * nz[b].1;
+                    }
+                }
+            }
+        }
+    }
+
+    fn into_triplets(self, nsc: usize, st: &mut SurfaceTerms) {
+        for (_, (idx, m)) in self.blocks {
+            let n = idx.len();
+            for ci in 0..3 {
+                for a in 0..n {
+                    for cj in 0..3 {
+                        for b in 0..n {
+                            let v = m[(ci * n + a) * 3 * n + cj * n + b];
+                            if v != 0.0 {
+                                st.rows.push(ci * nsc + idx[a]);
+                                st.cols.push(cj * nsc + idx[b]);
+                                st.vals.push(v);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Surface quadrature points of a set of triangles: `(point, weight, unit normal)`.
 /// The normal follows the triangle orientation (outward for a consistently oriented closed mesh).
 /// Triangles are split (midpoint refinement) until every edge is at most `max_edge`, so that
@@ -105,6 +158,29 @@ pub struct SurfaceTerms {
     pub missing_faces: Vec<String>,
 }
 
+/// Penalty Dirichlet `beta int_G (u - g).v` with a position-dependent value `g(x)` on the
+/// given triangles of `mesh` (all components).
+pub fn dirichlet_penalty_fn<G: Fn(&[f64; 3]) -> [f64; 3]>(sp: &SpaceBox, mesh: &crate::cut_cell::TriangleMesh3D, tris: &[usize], beta: f64, g: G) -> SurfaceTerms {
+    let body = CadBody::new("surface", mesh.clone(), crate::cad_model::MaterialProperties::default());
+    let h_min = sp.element_size().iter().cloned().fold(f64::MAX, f64::min);
+    let nsc = sp.ndof_sc;
+    let mut st = SurfaceTerms { force: vec![0.0; sp.ndof], ..Default::default() };
+    let mut acc = SurfaceAccumulator::default();
+    let ks = [[beta, 0.0, 0.0], [0.0, beta, 0.0], [0.0, 0.0, beta]];
+    for (x, w, _) in surface_quadrature(&body, tris, 0.25 * h_min) {
+        let nz = scalar_basis_at(sp, &x);
+        let gx = g(&x);
+        for c in 0..3 {
+            for &(ga, na) in &nz {
+                st.force[c * nsc + ga] += beta * w * na * gx[c];
+            }
+        }
+        acc.add(&nz, ks, w);
+    }
+    acc.into_triplets(nsc, &mut st);
+    st
+}
+
 /// Integrates all labelled boundary conditions of `assembly` that target faces of
 /// `body_idx`. `penalty_factor` scales the Dirichlet penalty `beta = factor * E / h_min`.
 pub fn surface_boundary_terms(sp: &SpaceBox, assembly: &CadAssembly, body_idx: usize, penalty_factor: f64) -> SurfaceTerms {
@@ -113,6 +189,7 @@ pub fn surface_boundary_terms(sp: &SpaceBox, assembly: &CadAssembly, body_idx: u
     let h_min = sp.element_size().iter().cloned().fold(f64::MAX, f64::min);
     let beta = penalty_factor * body.material.youngs_modulus / h_min;
     let mut st = SurfaceTerms { force: vec![0.0; sp.ndof], ..Default::default() };
+    let mut acc = SurfaceAccumulator::default();
     for bc in &assembly.boundary_conditions {
         let face = match body.faces.get(&bc.target_face_name) {
             Some(f) => f,
@@ -127,19 +204,17 @@ pub fn surface_boundary_terms(sp: &SpaceBox, assembly: &CadAssembly, body_idx: u
             let nz = scalar_basis_at(sp, &x);
             match &bc.bc_type {
                 BoundaryConditionType::Dirichlet { components, values } => {
+                    let mut ks = [[0.0; 3]; 3];
                     for c in 0..3 {
                         if !components[c] {
                             continue;
                         }
+                        ks[c][c] = beta;
                         for &(ga, na) in &nz {
                             st.force[c * nsc + ga] += beta * w * na * values[c];
-                            for &(gb, nb) in &nz {
-                                st.rows.push(c * nsc + ga);
-                                st.cols.push(c * nsc + gb);
-                                st.vals.push(beta * w * na * nb);
-                            }
                         }
                     }
+                    acc.add(&nz, ks, w);
                 }
                 BoundaryConditionType::NeumannTraction { traction } => {
                     for &(ga, na) in &nz {
@@ -156,25 +231,17 @@ pub fn surface_boundary_terms(sp: &SpaceBox, assembly: &CadAssembly, body_idx: u
                     }
                 }
                 BoundaryConditionType::RobinFoundation { normal_stiffness, tangential_stiffness } => {
-                    for ci in 0..3 {
-                        for cj in 0..3 {
+                    let ks: [[f64; 3]; 3] = std::array::from_fn(|ci| {
+                        std::array::from_fn(|cj| {
                             let delta = if ci == cj { 1.0 } else { 0.0 };
-                            let k = normal_stiffness * n[ci] * n[cj] + tangential_stiffness * (delta - n[ci] * n[cj]);
-                            if k == 0.0 {
-                                continue;
-                            }
-                            for &(ga, na) in &nz {
-                                for &(gb, nb) in &nz {
-                                    st.rows.push(ci * nsc + ga);
-                                    st.cols.push(cj * nsc + gb);
-                                    st.vals.push(w * k * na * nb);
-                                }
-                            }
-                        }
-                    }
+                            normal_stiffness * n[ci] * n[cj] + tangential_stiffness * (delta - n[ci] * n[cj])
+                        })
+                    });
+                    acc.add(&nz, ks, w);
                 }
             }
         }
     }
+    acc.into_triplets(nsc, &mut st);
     st
 }

@@ -41,6 +41,10 @@ path = "src/bin/cad_gui.rs"
 name = "topopt_cad"
 path = "src/bin/topopt_cad.rs"
 
+[[bin]]
+name = "verification_studies"
+path = "src/bin/verification_studies.rs"
+
 [profile.release]
 opt-level = 3
 lto = true
