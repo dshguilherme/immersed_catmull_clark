@@ -12,6 +12,8 @@ pub mod pairing;
 pub mod ptn;
 pub mod iga;
 pub mod sparse;
+pub mod immersed;
+pub mod immersed_bc;
 
 pub use bspline::{evaluate_bspline_basis_1d, open_knot_vector};
 pub use octree::{BoundingBox3D, OctreeCell, OctreeMesh3D};

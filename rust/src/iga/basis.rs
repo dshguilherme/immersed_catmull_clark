@@ -69,6 +69,70 @@ pub fn basis_funs(knots: &[f64], degree: usize, x: f64) -> (usize, Vec<f64>, Vec
     (s - p, b, db)
 }
 
+/// Nonzero basis functions and their derivatives up to order `n` at `x`
+/// (Piegl & Tiller, The NURBS Book, A2.3). Returns `(first, ders)` with
+/// `ders[k][r]` = d^k/dx^k N_{first + r}(x); orders above the degree are zero.
+/// `span` overrides the knot span (useful to take one-sided limits at a knot).
+pub fn basis_funs_ders(knots: &[f64], degree: usize, x: f64, n: usize, span: Option<usize>) -> (usize, Vec<Vec<f64>>) {
+    let p = degree;
+    let s = span.unwrap_or_else(|| find_span(knots, p, x));
+    let mut ndu = vec![vec![0.0; p + 1]; p + 1];
+    let mut left = vec![0.0; p + 1];
+    let mut right = vec![0.0; p + 1];
+    ndu[0][0] = 1.0;
+    for j in 1..=p {
+        left[j] = x - knots[s + 1 - j];
+        right[j] = knots[s + j] - x;
+        let mut saved = 0.0;
+        for r in 0..j {
+            ndu[j][r] = right[r + 1] + left[j - r];
+            let temp = ndu[r][j - 1] / ndu[j][r];
+            ndu[r][j] = saved + right[r + 1] * temp;
+            saved = left[j - r] * temp;
+        }
+        ndu[j][j] = saved;
+    }
+    let mut ders = vec![vec![0.0; p + 1]; n + 1];
+    for j in 0..=p {
+        ders[0][j] = ndu[j][p];
+    }
+    let mut a = vec![vec![0.0; p + 1]; 2];
+    for r in 0..=p {
+        let (mut s1, mut s2) = (0usize, 1usize);
+        a[0][0] = 1.0;
+        for k in 1..=n.min(p) {
+            let mut d = 0.0;
+            let rk = r as isize - k as isize;
+            let pk = p - k;
+            if r >= k {
+                a[s2][0] = a[s1][0] / ndu[pk + 1][rk as usize];
+                d = a[s2][0] * ndu[rk as usize][pk];
+            }
+            let j1 = if rk >= -1 { 1 } else { (-rk) as usize };
+            let j2 = if (r as isize - 1) <= pk as isize { k - 1 } else { p - r };
+            for j in j1..=j2 {
+                let idx = (rk + j as isize) as usize;
+                a[s2][j] = (a[s1][j] - a[s1][j - 1]) / ndu[pk + 1][idx];
+                d += a[s2][j] * ndu[idx][pk];
+            }
+            if r <= pk {
+                a[s2][k] = -a[s1][k - 1] / ndu[pk + 1][r];
+                d += a[s2][k] * ndu[r][pk];
+            }
+            ders[k][r] = d;
+            std::mem::swap(&mut s1, &mut s2);
+        }
+    }
+    let mut fac = p as f64;
+    for k in 1..=n.min(p) {
+        for j in 0..=p {
+            ders[k][j] *= fac;
+        }
+        fac *= (p - k) as f64;
+    }
+    (s - p, ders)
+}
+
 /// Dense values and derivatives of all basis functions at the points `xs`:
 /// row-major `[xs.len() x ndof]`.
 pub fn basis_dense(knots: &[f64], degree: usize, xs: &[f64]) -> (Vec<f64>, Vec<f64>) {
@@ -89,6 +153,33 @@ pub fn basis_dense(knots: &[f64], degree: usize, xs: &[f64]) -> (Vec<f64>, Vec<f
 mod tests {
     use super::*;
     use crate::iga::quadrature::open_knots;
+
+    #[test]
+    fn higher_derivatives_match_first_derivative_and_finite_differences() {
+        for p in 1..=4usize {
+            let knots = open_knots(6, p, p as isize - 1);
+            for j in 0..12 {
+                let x = 0.031 + 0.081 * j as f64;
+                let (f0, v, d1) = basis_funs(&knots, p, x);
+                let (f1, ders) = basis_funs_ders(&knots, p, x, p, None);
+                assert_eq!(f0, f1);
+                for r in 0..=p {
+                    assert!((ders[0][r] - v[r]).abs() < 1e-13);
+                    assert!((ders[1][r] - d1[r]).abs() < 1e-11);
+                }
+                // order-k derivative vs central difference of order k-1
+                let h = 1e-5;
+                for k in 2..=p {
+                    let (_, dp) = basis_funs_ders(&knots, p, x + h, k - 1, None);
+                    let (_, dm) = basis_funs_ders(&knots, p, x - h, k - 1, None);
+                    for r in 0..=p {
+                        let fd = (dp[k - 1][r] - dm[k - 1][r]) / (2.0 * h);
+                        assert!((ders[k][r] - fd).abs() < 1e-4 * (1.0 + fd.abs()), "p={} k={} r={}", p, k, r);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn partition_of_unity_and_derivatives() {

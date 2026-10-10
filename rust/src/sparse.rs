@@ -93,6 +93,24 @@ impl CsrMatrix {
     pub fn nnz(&self) -> usize {
         self.data.len()
     }
+
+    /// Returns `self + T`, where `T` is given as (row, col, value) triplets.
+    pub fn plus_triplets(&self, rows: &[usize], cols: &[usize], vals: &[f64]) -> CsrMatrix {
+        let mut r = Vec::with_capacity(self.nnz() + rows.len());
+        let mut c = Vec::with_capacity(self.nnz() + rows.len());
+        let mut v = Vec::with_capacity(self.nnz() + rows.len());
+        for i in 0..self.nrows {
+            for k in self.indptr[i]..self.indptr[i + 1] {
+                r.push(i);
+                c.push(self.indices[k]);
+                v.push(self.data[k]);
+            }
+        }
+        r.extend_from_slice(rows);
+        c.extend_from_slice(cols);
+        v.extend_from_slice(vals);
+        CsrMatrix::from_triplets(self.nrows, self.ncols, &r, &c, &v)
+    }
 }
 
 /// Assembles `sum_e scale[e] * K_e` into a CSR matrix, where `elem(e)` returns the
