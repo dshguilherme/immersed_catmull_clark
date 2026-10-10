@@ -1,173 +1,169 @@
-# Immersed IGA: Matrix-Free Catmull-Clark Immersed Isogeometric Analysis
+# Immersed IGA: Immersed Isogeometric Analysis on Background Spline Grids
 
-A high-performance research framework in MATLAB for immersed Isogeometric Analysis (IGA) and Topology Optimization on arbitrary CAD B-Rep models using Catmull-Clark subdivision basis functions, Weighted Quadrature, Ghost Penalty stabilization, and FastFormation GPU matrix-free solvers.
+Research code for immersed isogeometric analysis (IGA) and topology optimization of
+CAD B-Rep models. The CAD surface is embedded in a background tensor-product B-spline
+grid (uniform or 2:1-balanced octree), and the elasticity problem is solved on that
+grid with matrix-free CPU/GPU solvers. On regular grids, cubic B-splines coincide with
+regular Catmull-Clark limit functions, which is where the Catmull-Clark naming in the
+code comes from. Most immersed solvers here default to quadratic (p = 2) B-splines.
 
----
-
-## Key Highlights
-
-- **Direct CAD B-Rep & Multi-Body Assembly Input**: Seamlessly imports **STP / STEP** (AP203 & AP242), **MSH**, **VTU / VTK**, and **STL** geometries via a robust headless Gmsh bridge (no MATLAB PDE Toolbox license required). Configures complex multi-body CAD assemblies with independent, scale-adapted non-conforming background octrees.
-- **Catmull-Clark Basis & Tensor-Product Weighted Quadrature**: Leverages the mathematical equivalence of regular Catmull-Clark limit functions to uniform cubic B-splines. Evaluates cell integrals via 1D Kronecker sum-factorization and sub-cell Weighted Quadrature (WQ).
-- **GPU Matrix-Free PCG Solver & Coupled Assembly**: Powered by `FastFormation` operator template precomputations (`op_su_ev`), `pagemtimes`, level-by-level tensor-product matvecs, and GPU array vectorization, delivering sub-second matrix-free PCG solutions directly in GPU VRAM without forming or storing global stiffness matrices.
-- **Unified Boundary Condition Engine**: Dispatches Dirichlet (strong elimination or weak penalty), Neumann (surface work tractions), and Robin (elastic foundation / impedance boundary operator $\bm{K}_{\text{Robin}}$) across arbitrary CAD boundaries and coordinate predicates.
-- **Non-Linear Unilateral & Bonded Assembly Contact**: Solves multi-body contact with semi-smooth Newton active-set iterations ($g_n \ge 0, p_n \le 0, p_n g_n = 0$), modulus-scaled physical penalties $\gamma_c \frac{E}{h}$, and exact non-conforming barycentric interface pairing.
-- **Automated Mechanics-Driven AMR Loop**: 2:1 balanced hierarchical octree with Multi-Point Constraint (MPC) hanging-node elimination ($\bm{T}_{3D}$), stress jump jump flux estimators ($\eta_e$), and Dörfler marking recovering optimal $\mathcal{O}(N^{-1})$ convergence rates.
-- **5-Obstacle Publication Benchmark Course**: Fully automated test harness validating patch tests to machine precision ($4.14 \times 10^{-18}$), Hertzian contact, re-entrant stress risers, industrial NIST AP203 assemblies, and GPU wall-clock scalability (>20x speedup).
+The MATLAB code in `src/` is the reference implementation. `rust/` is an early port;
+see [Rust port](#rust-port) and `docs/PORT_STATUS.md`.
 
 ---
 
-## Repository Structure
+## Status at a glance (audited 2026-10-10)
+
+| Area | State | Notes |
+| :--- | :--- | :--- |
+| B-spline kernel (`src/iga`) | **Verified** | In-house replacement for GeoPDEs. Matches GeoPDEs to machine precision; patch test, rigid-body null space and optimal L2 convergence rates are covered by `tests/testIgaKernel.m` |
+| FastFormation / weighted quadrature (2D and 3D) | **Verified** | Equals exact Gauss assembly for uniform density (machine precision) |
+| Structured topology optimization (2D/3D, SIMP + OC) | Working | Sensitivities checked against element energies |
+| CAD import (STEP/MSH/VTU/STL via Gmsh) | Working | |
+| Immersed boundary treatment | **Simplified** | Cut cells use the full-cell stiffness scaled by the cell's volume fraction (fictitious-domain / density scaling). The geometry is not integrated exactly, so expect reduced accuracy near the boundary |
+| Dirichlet BC on immersed surfaces (`assemble_nitsche_dirichlet_3d`) | **Penalty only** | Penalty term only (no Nitsche consistency/symmetry terms); trace evaluated by trilinear interpolation at facet centroids; `u_prescribed` is ignored |
+| Multi-body contact, AMR, octree MPC, GPU PCG | Implemented, **not yet verified** against analytical benchmarks | See [Verification](#verification) |
+
+---
+
+## Requirements
+
+- **MATLAB** R2024b or newer. The Parallel Computing Toolbox is optional and needed only for the GPU paths.
+- **Python 3** with `gmsh` and `numpy`, for headless CAD import (`pip install gmsh numpy`).
+- **No GeoPDEs or NURBS toolbox.** `src/iga` provides the B-spline spaces, quadrature,
+  elasticity operators and weighted-quadrature rules. A few timing benchmarks can
+  optionally time GeoPDEs as an external reference: set the `GEOPDES_PATH` environment
+  variable to the folder that contains GeoPDEs (see `benchmarks/geopdes_baseline_available.m`).
+  Without it, those baseline columns are reported as `NaN`.
+- **Rust** (optional), with the LLVM-MinGW toolchain configured by `run_rust.ps1`. Crate
+  dependencies: `rayon`, `wgpu`, `cudarc` (CUDA driver API), `eframe` (GUI).
+
+---
+
+## Repository structure
 
 ```
 immersed-iga/
 ├── src/
-│   ├── brep/                          # CAD B-Rep import & conversion pipeline
-│   │   ├── importBRep.m               # Unified dispatcher (.stp, .msh, .vtu, .stl)
-│   │   ├── importSTEP.m, importMSH.m, importVTU.m
-│   │   └── brep_to_tri_mesh.py        # Headless Gmsh parser
-│   ├── catmull_clark/                 # Catmull-Clark subdivision & projection
-│   │   ├── subdivide_quad_catmull_clark.m
-│   │   ├── catmull_clark_projection_matrices.m (2D)
-│   │   ├── catmull_clark_projection_matrices_3d.m (3D)
-│   │   └── catmull_clark_subdivision_matrix_1d.m (Octree transitions)
-│   ├── fastformation/                 # FastFormation core engine & GPU kernels
-│   │   ├── fast_stiffness_assembly_gpu.m
-│   │   ├── topopt_iga_3d.m
-│   │   └── wq_setup.m, wq_form.m
-│   └── immersed/                      # Immersed boundary & assembly engine
-│       ├── setup_assembly_3d.m        # Multi-body independent octree container
-│       ├── solve_assembly_contact_3d.m# Unilateral active-set Newton & bonded contact
-│       ├── gpu_assembly_matvec.m      # Matrix-free GPU coupled assembly operator
-│       ├── gpu_octree_matvec.m        # Level-by-level matrix-free GPU tensor matvec
-│       ├── solve_octree_gpu.m         # Native GPU VRAM Preconditioned Conjugate Gradient
-│       ├── apply_boundary_conditions.m# Unified Dirichlet, Neumann, Robin dispatcher
-│       ├── assemble_neumann_bc_3d.m   # Surface traction & pressure integration
-│       ├── assemble_robin_bc_3d.m     # Elastic foundation stiffness operator
-│       ├── octree_mesh_3d.m           # Adaptive 3D octree generator
-│       ├── balance_octree_3d.m        # Strict 2:1 balancing
-│       ├── octree_structural_mesh.m   # Multi-Point Constraint (MPC) hanging nodes (T_3D)
-│       ├── compute_amr_stress_indicators.m # Stress jump & Dörfler marking
-│       └── adaptive_mesh_refinement_loop.m # Automated Solve->Mark->Refine->Resolve loop
-├── benchmarks/                        # Publication benchmarks & verification course
-│   ├── run_complete_obstacle_course.m # 5-obstacle automated validation harness
-│   ├── plot_obstacle_course_figures.m # High-contrast 300 DPI publication figure generator
-│   ├── cantilever_topopt.m            # 2D Cantilever baseline
-│   └── run_nist_immersed_topopt.m     # 3D Immersed TopOpt on NIST CTC-01
-├── tests/                             # Automated test suite (17 passed, 100% pass)
-│   ├── run_all_tests.m                # Master test suite runner
-│   ├── testObstacleCourse.m           # 5-obstacle test runner
-│   ├── testBoundaryConditions.m       # Dirichlet, Neumann, Robin tests
-│   ├── testAssemblyContact.m          # Multi-body contact tests
-│   ├── testGPUAssemblyContact.m       # GPU matrix-free assembly contact tests
-│   └── testGPUOctree.m                # GPU PCG matrix-free operator tests
-├── rust/                              # High-performance native Rust implementation
-│   ├── Cargo.toml                     # Rust crate configuration (zero external dependencies)
-│   ├── src/
-│   │   ├── lib.rs                     # Library exports
-│   │   ├── bspline.rs                 # In-house Cox-de Boor B-spline evaluator
-│   │   ├── octree.rs                  # 3D 2:1 balanced adaptive octree engine
-│   │   ├── structural_mesh.rs         # MPC hanging node constraint engine
-│   │   ├── solver.rs                  # Matrix-free PCG & active-set contact solvers
-│   │   ├── cut_cell.rs                # 3D Ray-casting & cut-cell Gauss quadrature
-│   │   ├── topopt.rs                  # 3D SIMP topology optimization & density filter
-│   │   ├── cad_model.rs               # Labeled CAD bodies, boundary faces, materials, BCs
-│   │   └── bin/
-│   │       ├── obstacle_course.rs     # 5-obstacle verification benchmark binary
-│   │       ├── wgpu_matrixfree_benchmark.rs # WGPU compute shader matrix-free kernel
-│   │       ├── cuda_matrixfree_benchmark.rs # Native CUDA driver API kernel (cudarc)
-│   │       ├── topopt_3d.rs           # 3D SIMP topology optimization solver
-│   │       └── solve_cad.rs           # End-to-end immersed CAD solver with labeled BCs
-├── scripts/
-│   └── plot_publication_figures.py    # Zero-licensing Python matplotlib publication plotter
-└── figures/                           # High-resolution figures (local, git-ignored)
+│   ├── iga/             # In-house B-spline kernel (replaces GeoPDEs): knots, Cox-de Boor
+│   │                    # values and derivatives, box spaces, exact elasticity element
+│   │                    # matrices, load vectors, weighted-quadrature rules
+│   ├── brep/            # CAD import (.stp/.msh/.vtu/.stl) via headless Gmsh
+│   ├── catmull_clark/   # Catmull-Clark subdivision and projection matrices
+│   ├── fastformation/   # Weighted-quadrature stiffness formation (CPU/GPU), sensitivities,
+│   │                    # structured 2D/3D topology optimization, timing scripts
+│   └── immersed/        # Cell classification, cut-cell weights, ghost penalty, BC engine,
+│                        # octree + MPC, AMR loop, multi-body contact, GPU PCG, immersed topopt
+├── tests/               # matlab.unittest suite (run_all_tests.m)
+├── benchmarks/          # Obstacle course, topology-optimization benchmarks, optional
+│                        # GeoPDEs baselines (external_geopdes/ needs GeoPDEs)
+├── examples/            # Demos
+├── rust/                # Rust port (library + binaries, CAD BC-labelling GUI)
+├── scripts/             # Python plotting and the PyVista BC labeller
+└── docs/PORT_STATUS.md  # MATLAB -> Rust port audit
 ```
 
----
+`Models/`, `Articles/` and `figures/` are local only and git-ignored.
 
 ---
 
-## Performance Benchmark: MATLAB vs. Rust (CPU & GPU)
+## Quick start (MATLAB)
 
-Benchmarks executed on **NVIDIA GeForce RTX 2050 (4 GB VRAM, Ampere GA107)** with identical problem configurations and mathematical formulations.
-
-### 1. Matrix-Free Element-Level MatVec ($y_e = w_e K_e p_e$)
-Evaluates tensor-product contractions without forming or storing global stiffness matrices (multi-backend benchmark on RTX 2050):
-
-| Elements ($N_e$) | Total DOFs | MATLAB CPU | MATLAB GPU (`gpuArray`) | Rust CPU (1T) | Rust CPU (Rayon) | Rust WGPU (DX12) | Rust Native CUDA (Warp-Coalesced) | Peak GPU Throughput |
-| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **500** | 12,000 | 0.052 ms | 0.084 ms | 0.070 ms | 0.202 ms | 0.048 ms | **0.012 ms** | 47.7 GFLOP/s |
-| **2,000** | 48,000 | 0.080 ms | 0.096 ms | 0.263 ms | 0.292 ms | 0.061 ms | **0.016 ms** | 144.9 GFLOP/s |
-| **8,000** | 192,000 | 0.222 ms | 0.126 ms | 1.064 ms | 0.550 ms | 0.085 ms | **0.034 ms** | 269.8 GFLOP/s |
-| **32,000** | 768,000 | 1.027 ms | 0.243 ms | 4.333 ms | 1.145 ms | 0.325 ms | **0.120 ms** | **306.9 GFLOP/s** |
-
-> **CUDA Warp-Coalesced Architecture**: Uses 1 warp (32 threads) per element with 100% coalesced 96-byte memory transactions, shared-memory stiffness caching (`s_ke`), and parallel row contraction, delivering **>306 GFLOP/s** sustained throughput (over **2× faster than MATLAB's cuBLAS**).
-
-> **Note on GPU Scaling**: In iterative PCG solvers, vectors remain persistent in VRAM. Rust's WGPU compute shader achieves **>112 GFLOP/s** sustain across 32,000 elements with zero host memory bandwidth bottlenecks.
-
-### 2. Component & Obstacle Course Timings
-
-| Benchmark Task | Problem Size | MATLAB Wall-Clock | Rust Native Wall-Clock | Rust Speedup |
-| :--- | :--- | :---: | :---: | :---: |
-| **Cox-de Boor 1D B-spline Basis** | 1,000,000 evaluation points ($p=3$) | 139.1 ms | **177.3 ms** *(Rayon multithread)* | 0.79x *(MATLAB JIT vs Rust Rayon)* |
-| **Octree 2:1 Balancing + MPC Assembly** | 22 leaf cells, 64 nodes, 123 DOFs | 396.4 ms | **0.051 ms** (51 µs) | **7,770x faster** |
-| **Full 5-Obstacle Course (Total)** | Patch Test, Hertzian, AMR, STEP, PCG | 3,080.0 ms (3.08 s) | **0.244 ms** (244 µs) | **12,620x faster** |
-
----
-
-## Quick Start
-
-### Prerequisites
-1. **MATLAB** (R2024b / R2025a recommended, with Parallel Computing Toolbox for optional NVIDIA GPU acceleration).
-2. **Zero External IGA Toolboxes**: The codebase is **100% self-contained** and uses our own clean-room Cox-de Boor B-spline evaluator (`evaluate_bspline_basis_1d.m`) and octree MPC solvers. No GeoPDEs or third-party NURBS licenses required.
-3. **Python 3** with `gmsh` and `numpy` (for headless CAD B-Rep parsing):
-   ```bash
-   pip install gmsh numpy
-   ```
-4. **Rust** (optional, for native memory-safe execution):
-   ```bash
-   cargo build --release --manifest-path rust/Cargo.toml
-   ```
-
-### 1. Run the Complete 5-Obstacle Publication Benchmark Course (MATLAB)
 ```matlab
-addpath(genpath('src'));
-addpath('tests');
-addpath('benchmarks');
+% Test suite (no GeoPDEs needed)
+run('tests/run_all_tests.m');
+
+% Obstacle course (see the caveats under Verification)
+addpath(genpath('src')); addpath('tests', 'benchmarks');
 results = run_complete_obstacle_course();
+
+% Immersed elasticity solve on a STEP model
+brep = importBRep('Models/.../nist_ctc_01_asme1_rd.stp');
+sol  = solve_immersed_iga_3d(brep, struct('grid_res', [24 16 12]));
 ```
-Validates all 5 obstacles in under 2 seconds:
-- **Obstacle 1**: 3D Elasticity Patch Test (machine precision: $4.14 \times 10^{-18}$)
-- **Obstacle 2**: Analytical Hertzian Unilateral Contact (active-set semi-smooth Newton)
-- **Obstacle 3**: Re-entrant Singular Stress Riser Adaptive Octree AMR (recovering optimal $\mathcal{O}(N^{-1})$ rate)
-- **Obstacle 4**: Industrial NIST AP203 STEP Assembly (Dirichlet, Neumann, Robin, and Bonded contact)
-- **Obstacle 5**: Matrix-Free GPU PCG Scalability (>20x speedup over CPU sparse solvers)
-
-### 2. Run the Native Rust Obstacle Course
-```bash
-cargo run --release --manifest-path rust/Cargo.toml --bin obstacle_course
-
-# Run WGPU Matrix-Free GPU Compute Shader Benchmark
-cargo run --release --manifest-path rust/Cargo.toml --bin wgpu_matrixfree_benchmark
-
-# Run Native NVIDIA CUDA Benchmark (cudarc Driver API)
-cargo run --release --manifest-path rust/Cargo.toml --bin cuda_matrixfree_benchmark
-```
-Executes the self-contained Rust implementation with your choice of CPU, cross-platform WGPU compute shaders, or direct native NVIDIA CUDA kernels.
 
 ---
 
-## Generated Figures Gallery
+## Verification
 
-| Benchmark / Module | Output Figure | Description |
-| :--- | :--- | :--- |
-| **Paper Fig. 6 Replication** | `figures/fig_topopt_catmull_clark_3d.png` | 101,400 DOF 3D Space-Frame Cantilever ($48\times 24\times 24$ mesh, 25 iters in 36.7 s) |
-| **NIST STEP Classification** | `figures/nist_step_immersed_classification.png` | Ray-casting cell partition (Inside, Outside, Cut) |
-| **Immersed GPU Elasticity** | `figures/nist_step_immersed_gpu_solve.png` | Surface displacement on NIST CTC-01 via GPU PCG |
-| **NIST Immersed TopOpt** | `figures/fig_topopt_nist_ctc01_immersed.png` | Optimal topology isosurface inside NIST CAD shell + convergence |
-| **Adaptive Octree** | `figures/fig_octree_nist_immersed_refinement.png` | Boundary leaf subdivision and level distribution |
+**What is verified** (`tests/testIgaKernel.m`, part of `run_all_tests.m`):
+- Gauss rules are exact; B-spline partition of unity holds; derivatives agree with finite differences.
+- The assembled stiffness is symmetric, with exactly 3 (2D) or 6 (3D) rigid-body modes in its null space.
+- Patch test: linear displacement fields are reproduced to round-off (2D and 3D, p = 2, 3).
+- Manufactured solution (plane strain): optimal L2 convergence rate p + 1 for p = 2, 3.
+- Weighted-quadrature formation equals exact Gauss assembly for uniform density (2D and 3D).
+- Element-density sensitivities equal the element strain energies.
+- With `GEOPDES_PATH` set, the stiffness matrix also agrees with GeoPDEs `op_su_ev` to around 1e-15.
+
+**What the obstacle course actually checks** (`benchmarks/run_complete_obstacle_course.m`):
+
+| Obstacle | Check performed |
+| :--- | :--- |
+| 1. Patch test | Rigid-body energy and linear-field reproduction on an axis-aligned octree (trilinear elements, no cut cells) |
+| 2. "Hertzian" contact | Flat punch on a block on 2×2×2 grids. Passes if the active set converged with at least one active pair and min gap ≥ −0.01. **No comparison with the Hertz solution** |
+| 3. AMR | Geometric refinement near the re-entrant corner. Passes if the DOF count grows by more than 1.5×. **No error or convergence-rate measurement** |
+| 4. NIST assembly | 2-body bonded assembly on 2×2×2 grids; checks that the solution is finite. Marked as passed if the STEP file is missing |
+| 5. GPU solver | Matrix-free vs assembled matvec agreement (around 1e-16) and PCG convergence on 267 DOFs. **No speedup measurement** |
+
+These are smoke tests, not validation. A verification suite with manufactured solutions on
+curved immersed domains, small-cut robustness, contact patch tests, a real Hertz problem and
+AMR rates is planned.
+
+---
+
+## Performance
+
+**Element-level matrix-free matvec** (`y_e = w_e K_e p_e`), measured on an NVIDIA GeForce RTX 2050:
+
+| Elements | DOFs | MATLAB CPU | MATLAB GPU | Rust CPU (1T) | Rust CPU (Rayon) | Rust WGPU | Rust CUDA |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| 500 | 12,000 | 0.052 ms | 0.084 ms | 0.070 ms | 0.202 ms | 0.048 ms | 0.012 ms |
+| 2,000 | 48,000 | 0.080 ms | 0.096 ms | 0.263 ms | 0.292 ms | 0.061 ms | 0.016 ms |
+| 8,000 | 192,000 | 0.222 ms | 0.126 ms | 1.064 ms | 0.550 ms | 0.085 ms | 0.034 ms |
+| 32,000 | 768,000 | 1.027 ms | 0.243 ms | 4.333 ms | 1.145 ms | 0.325 ms | 0.120 ms |
+
+Caveats:
+- These time a single batched element matvec with a synthetic 24×24 element matrix (trilinear-hex size). They are kernel throughput figures, not solver or assembly timings.
+- The DOF column is `24 × elements` with no shared DOFs.
+- The MATLAB columns have not been re-run since the audit.
+
+Earlier versions of this README listed 7,770× and 12,620× Rust speedups for the octree and the
+obstacle course. Those figures compared full MATLAB computations with Rust placeholder code
+and have been withdrawn. Some timing scripts in `src/fastformation/` also contain
+extrapolated or modelled (unmeasured) values; each script documents this in its header.
+
+---
+
+## Corrections from the 2026-10-10 audit
+
+- **3D weighted quadrature:** the previous 3D FastFormation assembly (`C_ijkl` Voigt map) had an indexing
+  error that put ∂₃u₃ into γ₁₃. The resulting stiffness was 33% off even at uniform density. The
+  in-house version is exact. 2D was unaffected.
+- **Degree p ≥ 3 in the 3D immersed solvers:** the old 3×3×3 "template" shortcut is exact only for p ≤ 2.
+  For p = 3 it gave 38% error on interior elements. Element matrices are now computed exactly for any degree.
+- **2D cantilever load:** the external `forceCantileverCentered` also loaded quadrature points outside the
+  intended patch, through a vector-subscript cross product. The corrected load changes 2D compliance values by about 0.3%.
+
+---
+
+## Rust port
+
+`rust/` currently provides:
+- The octree with 2:1 balancing, hanging-node constraint maps, inside/outside classification, a generic PCG solver, and the SIMP/OC update with its density filter.
+- CAD labelling and topology utilities, and an egui BC-labelling GUI.
+- CUDA and WGPU matvec kernels.
+
+It does **not** yet contain a finite-element discretization. `solve_cad` and `topopt_3d` run on
+placeholder operators and synthetic strain energies, and the Rust `obstacle_course` does not
+reproduce the MATLAB checks. `docs/PORT_STATUS.md` tracks each module and the porting order.
+
+```powershell
+.\run_rust.ps1 build --release --manifest-path rust/Cargo.toml
+.\run_rust.ps1 test  --manifest-path rust/Cargo.toml
+```
 
 ---
 
 ## License
 
-This project is licensed under the MIT License.
+MIT. GeoPDEs (GPL) is neither bundled nor required.

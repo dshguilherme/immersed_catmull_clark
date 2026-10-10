@@ -26,11 +26,11 @@ The Rust crate has the *scaffolding* of the pipeline: an octree, a hanging-node 
 
 | Capability | MATLAB (reference) | Rust | Status | Notes |
 |---|---|---|---|---|
-| 1D B-spline basis (Cox-de Boor) | `catmull_clark/evaluate_bspline_basis_1d.m` | `bspline.rs` | Ported | Values only. **No derivatives**, which stiffness needs. Has a partition-of-unity test. |
+| 1D B-spline basis (Cox-de Boor) | `iga/iga_bspline_basis.m` (values and derivatives), `catmull_clark/evaluate_bspline_basis_1d.m` | `bspline.rs` | Partial | Values only. **No derivatives**, which stiffness needs. Has a partition-of-unity test. |
 | Catmull-Clark subdivision / projection (2D, 3D, 1D octree transfer) | `catmull_clark/*` | — | Missing | |
-| Tensor-product spline space / mesh (GeoPDEs `sp_bspline`, `msh_cartesian`) | external GeoPDEs | — | Missing | The MATLAB side depends on GeoPDEs here, despite what the README says. |
-| Element stiffness (elasticity, Lamé) | `solve_immersed_iga_3d.m`, `octree_structural_mesh.m` (`ke_by_level`) | — | **Missing** | This is the critical blocker. |
-| Weighted quadrature / FastFormation | `fastformation/wq_setup.m`, `wq_form.m`, `fast_stiffness_assembly*.m` | — | Missing | |
+| Tensor-product spline space on a box | `iga/iga_space_box.m`, `iga_space_1d.m`, `iga_open_knots.m` | — | Missing | Was GeoPDEs. Replaced on 2026-10-10 by in-house code, verified against GeoPDEs |
+| Element stiffness (elasticity, Lamé) | `iga/iga_elasticity_element_matrices.m` (spline), `octree_structural_mesh.m` (`ke_by_level`, trilinear hex) | — | **Missing** | This is the critical blocker. The MATLAB spline version is exact for any degree; it is built from 1D Kronecker factors, with one matrix per distinct element type. |
+| Weighted quadrature / FastFormation | `iga/iga_wq_rules_1d.m`, `iga_wq_elasticity_tensor.m`, `fastformation/wq_setup.m`, `wq_form.m`, `fast_stiffness_assembly*.m` | — | Missing | The old 3D version was wrong (`C_ijkl` indexing) and is fixed now |
 | CAD import STEP/MSH/VTU/STL | `brep/import*.m` + Gmsh Python | `cad_model.rs::parse_obj`, `from_json` | Partial | Rust reads OBJ and its own JSON format only. STEP still has to go through the Python/Gmsh path. |
 | Inside/outside classification | `classify_background_cells.m` | `cut_cell.rs::is_point_inside` | Ported | Ray-parity test is O(#triangles) per point; `bvh.rs` exists but isn't wired in. |
 | Cut-cell quadrature | `compute_cut_cell_quadrature.m`, `assemble_immersed_element_weights.m` | `cut_cell.rs::classify_box_quadrature` | Partial | Returns only a volume-fraction scalar from midpoint sub-cells. **No quadrature points or weights** for integrating the stiffness. |
@@ -54,18 +54,27 @@ The Rust crate has the *scaffolding* of the pipeline: an octree, a hanging-node 
 
 ## Obstacle course: MATLAB vs Rust
 
-| # | MATLAB `run_complete_obstacle_course.m` | Rust `bin/obstacle_course.rs` actually checks |
+Neither course is a validation suite. The MATLAB one is a smoke test too (see README → Verification).
+
+| # | MATLAB `run_complete_obstacle_course.m` actually checks | Rust `bin/obstacle_course.rs` actually checks |
 |---|---|---|
-| 1 | 3D elasticity patch test (solve, reaction forces) | Hanging-node constraint rows reproduce a linear field. No solve. |
-| 2 | Hertzian contact vs analytical pressure (target: within 5%) | 5 hard-coded gaps are classified by sign (2 active). |
-| 3 | Re-entrant corner AMR, O(N⁻¹) convergence rate | The leaf count goes up after refining around a point. |
-| 4 | NIST AP203 STEP assembly with Dirichlet, Neumann, Robin and bonded contact | B-spline partition of unity. |
-| 5 | GPU PCG scalability on 10⁵+ DOFs | CG on a 1000-unknown 1D tridiagonal matrix. |
+| 1 | Rigid-body energy and linear-field patch test on an aligned trilinear octree, with a real solve | Hanging-node constraint rows reproduce a linear field. No solve. |
+| 2 | Flat punch on 2×2×2 grids: the active set converges and the gap is ≥ −0.01. No comparison with Hertz | 5 hard-coded gaps are classified by sign (2 active). |
+| 3 | DOF count grows by more than 1.5× after geometric refinement. No solve, no rate | The leaf count goes up after refining around a point. |
+| 4 | Bonded 2-body NIST assembly on 2×2×2 grids; `u` is finite. Passes automatically if the STEP file is missing | B-spline partition of unity. |
+| 5 | Matrix-free vs assembled matvec agreement and PCG convergence on 267 DOFs | CG on a 1000-unknown 1D tridiagonal matrix. |
+
+## Known MATLAB-side method limitations (port these deliberately, not blindly)
+
+- **Cut cells:** volume-fraction scaling of the full-cell stiffness (`scale = Emin + (1-Emin)·w_e`), not exact cut-cell integration.
+- **`assemble_nitsche_dirichlet_3d`:** penalty term only, trilinear trace interpolation at facet centroids, `u_prescribed` ignored.
+- **`assemble_nitsche_contact_3d`:** also uses trilinear interpolation of control values.
+- **Timing scripts in `src/fastformation/`:** several report extrapolated or modelled values (documented in each header).
 
 ## Suggested porting order (critical path)
 
-1. **B-spline derivatives**, then a tensor-product **cubic B-spline space** on a uniform grid with connectivity.
-2. **Gauss quadrature and the elasticity element stiffness.** Validate one element and one small grid against MATLAB's `K` (Frobenius-norm difference).
+1. **Port `src/iga` one-to-one:** knots, B-spline values and derivatives, box space, connectivity (GeoPDEs numbering).
+2. **Gauss quadrature and the elasticity element stiffness** (Kronecker form, per element type). Validate against MATLAB's `K` by Frobenius-norm difference, plus the patch and manufactured-solution tests from `tests/testIgaKernel.m`.
 3. **Cut-cell quadrature points and weights** (sub-cell Gauss using the in/out test, with the BVH), plus **ghost penalty**.
 4. **Real `solve_cad`**: assembled or matrix-free K, then BCs, then PCG. Validate the cantilever tip deflection against MATLAB and against beam theory.
 5. **Nitsche Dirichlet and surface-integrated Neumann/Robin.**

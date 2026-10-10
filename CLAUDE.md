@@ -6,6 +6,7 @@ matrix-free GPU PCG, and SIMP topology optimization. The MATLAB code is the refe
 `rust/` is a port in progress. Port status per module: `docs/PORT_STATUS.md` — keep it current.
 
 ## Layout
+- `src/iga/` — in-house B-spline kernel (box spaces, exact elasticity element matrices, loads, WQ rules). Replaced GeoPDEs; numbering matches GeoPDEs conventions. Verified by `tests/testIgaKernel.m`.
 - `src/brep/` — CAD import (STEP/MSH/VTU/STL) via headless Gmsh (`*.py` called from MATLAB).
 - `src/catmull_clark/` — subdivision, CC projection matrices (2D/3D), in-house Cox-de Boor.
 - `src/fastformation/` — weighted quadrature (`wq_setup`/`wq_form`), fast/GPU assembly, structured topopt. Many `test_*`/`benchmark_*` scripts here are exploratory, not part of the suite.
@@ -21,7 +22,7 @@ MATLAB (R2025a on PATH):
 matlab -batch "run('tests/run_all_tests.m');"
 matlab -batch "addpath(genpath('src')); addpath('tests','benchmarks'); run_complete_obstacle_course();"
 ```
-Many MATLAB functions call GeoPDEs / NURBS-toolbox routines (`msh_cartesian`, `sp_bspline`, `op_su_ev`, `nrbmak`, …) that are **not in this repo** — they must be on the MATLAB path.
+No GeoPDEs dependency: never reintroduce GeoPDEs/NURBS-toolbox calls (GPL; the repo is MIT) or hard-coded `addpath` to folders outside the repo. GeoPDEs is allowed only as an optional, labelled timing/validation baseline via `benchmarks/geopdes_baseline_available.m` (env var `GEOPDES_PATH`); `benchmarks/external_geopdes/` holds scripts that test third-party code.
 
 Rust — always go through `run_rust.ps1` (it sets up the LLVM-MinGW GNU toolchain; plain `cargo` fails to link):
 ```
@@ -33,6 +34,7 @@ The CUDA binary loads the prebuilt `rust/src/kernel.ptx` (sm_86, from `kernel.c`
 
 ## Conventions & cautions
 - Commit style: conventional commits (`feat(rust): …`, `feat(gui): …`, `perf(rust): …`).
+- Known method limitations (keep in mind before claiming accuracy): cut cells use volume-fraction scaling of the full-cell stiffness, not exact cut-cell integration; `assemble_nitsche_dirichlet_3d` is a penalty-only trilinear-trace approximation; the obstacle course is a smoke test (see README "Verification").
 - **Correctness over appearance.** Several existing Rust executables and benchmark tables print "PASSED" or report speedups from placeholder physics (synthetic operators and strain energies, see PORT_STATUS). Don't add more of that: a verification check must test the real quantity against an analytical or MATLAB reference, and benchmarks must compare like-for-like work. If something is a stub, label it as one in the code and in its output.
 - When porting a module, validate it against the MATLAB output on the same input (export to JSON/CSV), not only against self-consistency.
 - Rust: keep the core library free of GUI/GPU dependencies where possible; `rayon` is fine in the core.
