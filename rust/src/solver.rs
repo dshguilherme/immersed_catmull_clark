@@ -75,37 +75,3 @@ impl PcgSolver {
         (x, final_iter, final_res)
     }
 }
-
-/// Unilateral Contact Active-Set Newton Solver
-pub struct ActiveSetContactSolver {
-    pub max_iter: usize,
-    pub penalty: f64,
-}
-
-impl ActiveSetContactSolver {
-    pub fn new(max_iter: usize, penalty: f64) -> Self {
-        Self { max_iter, penalty }
-    }
-
-    /// Evaluates normal contact gaps and returns active pairs (gap_n < 0).
-    pub fn evaluate_active_set(&self, gaps_0: &[f64], u_a: &[f64], u_b: &[f64]) -> (Vec<bool>, Vec<f64>, Vec<f64>) {
-        let n = gaps_0.len();
-        let mut active = vec![false; n];
-        let mut gaps = vec![0.0; n];
-        let mut pressures = vec![0.0; n];
-
-        for i in 0..n {
-            let current_gap = gaps_0[i] + (u_b[i] - u_a[i]);
-            gaps[i] = current_gap;
-            if current_gap <= 0.0 {
-                active[i] = true;
-                pressures[i] = -self.penalty * current_gap;
-            } else {
-                active[i] = false;
-                pressures[i] = 0.0;
-            }
-        }
-
-        (active, gaps, pressures)
-    }
-}
