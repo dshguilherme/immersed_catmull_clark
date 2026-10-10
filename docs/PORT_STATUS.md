@@ -1,83 +1,65 @@
 # MATLAB → Rust Port Status
 
-Last audited: 2026-10-10 (against commit `eb4d55f` plus uncommitted work on `main`).
+Last updated: 2026-10-10.
 
 Status key:
-- **Ported**: same algorithm, usable.
-- **Partial**: some of the algorithm is there, with gaps listed.
-- **Stub**: the API exists, but the numbers are placeholders.
-- **Missing**: not ported yet.
+- **Parity**: ported, with a test that compares against data exported from MATLAB (`tests/export_rust_*.m` writes the fixtures to `rust/tests/fixtures/`).
+- **Verified**: also checked against an analytical answer.
+- **Partial**: ported in part; the gaps are listed.
+- **Missing**: not ported.
 - **Rust-only**: no MATLAB counterpart.
 
-"Validated" means the result has been checked against MATLAB or an analytical reference on the same input. **No Rust module is validated yet.**
-
-## Summary
-
-The Rust crate has the *scaffolding* of the pipeline: an octree, a hanging-node map, inside/outside classification, a PCG solver, a SIMP update and a filter. It also has a large GUI and CAD-topology layer. **It has no finite-element discretization yet.** No module computes element stiffness matrices, quadrature points or basis-function gradients, and there's no assembly. As a result:
-
-- **`solve_cad`** runs PCG on a made-up tridiagonal operator (`diag = 1.5E`, off-diagonal `-0.2·diag`). The displacements it prints are not elasticity results.
-- **`topopt_3d`** feeds the optimizer synthetic strain energies from a closed-form "bending profile" and never does an FE solve.
-- **`obstacle_course`**: none of the five checks exercises what the MATLAB obstacle with the same name tests (see below).
-- **CUDA and WGPU benchmarks** use a synthetic tridiagonal 24×24 `Ke`. This is fine for timing a matvec kernel, but they don't compute elasticity.
-
-**Impact on the README:** the "Component & Obstacle Course Timings" table (7,770× and 12,620× speedups) compares full MATLAB computations against these placeholders. Remove those figures or label them before anyone cites them. The element-matvec table compares kernels on comparable work, so it is fine with a caveat.
+Run everything with `.\run_rust.ps1 test --manifest-path rust/Cargo.toml --release`. The analytical checks are in `.\run_rust.ps1 run --release --manifest-path rust/Cargo.toml --bin obstacle_course`.
 
 ## Module matrix
 
-| Capability | MATLAB (reference) | Rust | Status | Notes |
+| Capability | MATLAB (reference) | Rust | Status | Evidence |
 |---|---|---|---|---|
-| 1D B-spline basis (Cox-de Boor) | `iga/iga_bspline_basis.m` (values and derivatives), `catmull_clark/evaluate_bspline_basis_1d.m` | `bspline.rs` | Partial | Values only. **No derivatives**, which stiffness needs. Has a partition-of-unity test. |
-| Catmull-Clark subdivision / projection (2D, 3D, 1D octree transfer) | `catmull_clark/*` | — | Missing | |
-| Tensor-product spline space on a box | `iga/iga_space_box.m`, `iga_space_1d.m`, `iga_open_knots.m` | — | Missing | Was GeoPDEs. Replaced on 2026-10-10 by in-house code, verified against GeoPDEs |
-| Element stiffness (elasticity, Lamé) | `iga/iga_elasticity_element_matrices.m` (spline), `octree_structural_mesh.m` (`ke_by_level`, trilinear hex) | — | **Missing** | This is the critical blocker. The MATLAB spline version is exact for any degree; it is built from 1D Kronecker factors, with one matrix per distinct element type. |
-| Weighted quadrature / FastFormation | `iga/iga_wq_rules_1d.m`, `iga_wq_elasticity_tensor.m`, `fastformation/wq_setup.m`, `wq_form.m`, `fast_stiffness_assembly*.m` | — | Missing | The old 3D version was wrong (`C_ijkl` indexing) and is fixed now |
-| CAD import STEP/MSH/VTU/STL | `brep/import*.m` + Gmsh Python | `cad_model.rs::parse_obj`, `from_json` | Partial | Rust reads OBJ and its own JSON format only. STEP still has to go through the Python/Gmsh path. |
-| Inside/outside classification | `classify_background_cells.m` | `cut_cell.rs::is_point_inside` | Ported | Ray-parity test is O(#triangles) per point; `bvh.rs` exists but isn't wired in. |
-| Cut-cell quadrature | `compute_cut_cell_quadrature.m`, `assemble_immersed_element_weights.m` | `cut_cell.rs::classify_box_quadrature` | Partial | Returns only a volume-fraction scalar from midpoint sub-cells. **No quadrature points or weights** for integrating the stiffness. |
-| Ghost penalty | `assemble_ghost_penalty_stabilization.m` | — | Missing | |
-| Octree + 2:1 balance | `octree_mesh_3d.m`, `balance_octree_3d.m`, `subdivide_octree_leaves.m` | `octree.rs` | Ported | Balancing hasn't been checked against MATLAB on the same tree. |
-| Hanging-node MPC map T₃D | `octree_structural_mesh.m` | `structural_mesh.rs` | Partial | Builds constraint rows for the nodes of 8-node trilinear hex elements, but doesn't produce the T matrix or assemble a stiffness. Its "patch test" only checks that the constraints interpolate a linear field, so it would pass even if the solver were wrong. |
-| Dirichlet BC (strong / Nitsche) | `apply_boundary_conditions.m`, `assemble_nitsche_dirichlet_3d.m` | `cad_model.rs::resolve_boundary_conditions_on_mesh` | Partial | Strong elimination only, and nodes are picked by a distance tolerance (0.15·span in `solve_cad`). No Nitsche. |
-| Neumann traction / pressure | `assemble_neumann_bc_3d.m` | `cad_model.rs` (same) | Partial | Lumps the traction onto nearby nodes; it doesn't integrate it over the surface with basis functions. |
-| Robin (elastic foundation) | `assemble_robin_bc_3d.m` | enum variant only | Stub | |
-| PCG solver | `solve_octree_gpu.m` | `solver.rs::PcgSolver` | Ported | Generic Jacobi-preconditioned CG with a closure for the matrix-vector product. Fine. |
-| Matrix-free octree operator Tᵀ K T p | `gpu_octree_matvec.m` | — | Missing | The CUDA/WGPU kernels could be reused for this once a real `Ke` exists. |
-| Multi-body setup | `setup_assembly_3d.m` | `cad_model.rs::CadAssembly` | Partial | Holds multiple bodies, but `solve_cad` only uses `bodies[0]`. |
-| Contact pairing (Nitsche, non-conforming) | `assemble_nitsche_contact_3d.m`, `assemble_octree_nitsche_contact.m`, `build_interface_projectors` | `pairing.rs` (face-level master/slave detection) | Partial | Rust pairs CAD faces, but has no gap computation at quadrature points and no projectors between the two bodies' meshes. |
-| Active-set semi-smooth Newton contact | `solve_assembly_contact_3d.m` | `solver.rs::ActiveSetContactSolver` | Stub | Only checks gap signs and computes a pressure. No Newton loop and no coupling to the solve. |
-| AMR indicators + Dörfler marking + loop | `compute_amr_stress_indicators.m`, `adaptive_mesh_refinement_loop.m` | — | Missing | Rust only refines geometrically around a point. |
-| SIMP / OC / density filter | `topopt_iga_3d.m`, `build_cartesian_filter_3d.m`, `fast_sensitivities.m` | `topopt.rs` | Partial | The optimizer and filter are real. It needs element strain energies from an FE solve, which doesn't exist yet. |
-| Immersed topopt | `topopt_immersed_iga_3d.m` | — | Missing | |
-| GPU backends | MATLAB `gpuArray` | `bin/cuda_matrixfree_benchmark.rs`, `bin/wgpu_matrixfree_benchmark.rs`, `kernel.c/.ptx` | Partial | Kernels exist but run only on synthetic data; they aren't part of the library. |
-| BC labeling GUI | `scripts/cad_bc_labeler_gui.py` (Python) | `bin/cad_gui.rs` | Rust-only (in progress) | Its in-process solve uses the same placeholder operator as `solve_cad`. |
-| CAD topology layer: query AST, entity arena, BVH, auto-pairing, persistent naming ("Pillars" 1, 2, 4, 5, 6) | — | `query.rs`, `topology.rs`, `bvh.rs`, `pairing.rs`, `ptn.rs` | Rust-only (uncommitted) | `bvh` isn't used by `cut_cell` yet. No document defining the pillars was found. |
+| B-spline basis, derivatives of any order | `iga/iga_bspline_basis.m` | `iga/basis.rs` | Verified | finite differences, partition of unity |
+| Box spline spaces (GeoPDEs numbering) | `iga/iga_space_box.m` | `iga/space.rs` | Parity | connectivity identical (`iga_vs_matlab`) |
+| Exact elasticity element matrices | `iga/iga_elasticity_element_matrices.m` | `iga/elasticity.rs` | Parity + verified | K·v < 1e-13; patch test; L2 rate p+1 (`iga_kernel`) |
+| Load vectors, field evaluation | `iga/iga_load_vector.m`, … | `iga/fields.rs` | Parity | F < 1e-13 |
+| Immersed solve (volume-fraction cut cells) | `immersed/solve_immersed_iga_3d.m` | `immersed.rs` | Parity | classification identical, u to 9e-12 (`immersed_vs_matlab`) |
+| Legacy "ghost penalty" | `assemble_ghost_penalty_stabilization.m` | `immersed::legacy_stabilization` | Parity | kept only for parity (see findings) |
+| Consistent ghost penalty (p-th normal-derivative jump) | — | `immersed::ghost_penalty` | Rust-only, verified | vanishes on polynomials of degree ≤ p |
+| CAD-face BCs: penalty Dirichlet, traction, pressure, Robin | — | `immersed_bc.rs` | Rust-only, verified | traction integrates to t·A; cantilever +1.2% vs Timoshenko |
+| `solve_cad` and the GUI's in-app solve | (placeholder before) | `bin/solve_cad.rs`, `bin/cad_gui.rs` | Real solver | uses `immersed` + `immersed_bc` |
+| Structured 3D SIMP topology optimization | `fastformation/topopt_iga_3d.m` (CPU path) | `topopt_iga.rs`, `bin/topopt_3d.rs` | Parity | compliance to 1e-7 over 6 iterations (`topopt_vs_matlab`) |
+| Octree, 2:1 balance, hanging-node MPC, trilinear K_master | `octree_structural_mesh.m`, `balance_octree_3d.m`, … | `octree.rs`, `octree_fem.rs` | Parity | mesh identical, K·v to 1e-12 (`octree_vs_matlab`) |
+| Octree BC engine (strong/penalty Dirichlet, traction, pressure, Robin) | `apply_boundary_conditions.m` + `assemble_*_bc_3d.m` | `octree_fem::apply_boundary_conditions` | Parity | loads and K to 1e-12, u to 9e-11 |
+| Multi-body assembly + penalty contact (unilateral, bonded) | `setup_assembly_3d.m`, `solve_assembly_contact_3d.m` | `contact.rs` | Parity | active set, gaps, base u to 1e-13 (`contact_vs_matlab`) |
+| Stress-driven AMR loop | `compute_amr_stress_indicators.m`, `adaptive_mesh_refinement_loop.m` | `amr.rs` | Parity | 3 cycles identical (`amr_vs_matlab`) |
+| PCG | `solve_octree_gpu.m` | `solver.rs` | Ported | absolute-threshold breakdown bug fixed |
+| Immersed topology optimization | `immersed/topopt_immersed_iga_3d.m` | — | Missing | next |
+| WQ / FastFormation assembly (2D, 3D) | `fastformation/fast_stiffness_assembly*.m`, `wq_setup.m`, `wq_form.m`, `iga/iga_wq_rules_1d.m` | — | Missing | |
+| 2D topology optimization (element / spline densities) | `topopt_iga_fast.m`, `topopt_iga_2d_mf.m`, `fast_sensitivities.m` | — | Missing | |
+| Catmull-Clark subdivision and projection | `catmull_clark/*` | — | Missing | |
+| CAD import STEP/MSH/VTU/STL | `brep/*` + Gmsh (Python) | `cad_model.rs` (OBJ, JSON) | Partial | STEP still needs the Python/Gmsh bridge |
+| GPU kernels | MATLAB `gpuArray` | `bin/cuda_matrixfree_benchmark.rs`, `bin/wgpu_matrixfree_benchmark.rs` | Partial | benchmarks only; not wired into the solvers |
+| CAD topology layer (query, arena, BVH, pairing, naming) | — | `query.rs`, `topology.rs`, `bvh.rs`, `pairing.rs`, `ptn.rs` | Rust-only | the BVH isn't used by the ray casting yet |
+| Legacy placeholders | — | `structural_mesh.rs`, `cad_model::resolve_boundary_conditions_on_mesh`, `topopt.rs` (old OC/filter), `solver::ActiveSetContactSolver` | Superseded | no longer used by the binaries |
 
-## Obstacle course: MATLAB vs Rust
+## Findings from porting the MATLAB code
 
-Neither course is a validation suite. The MATLAB one is a smoke test too (see README → Verification).
+These are problems in the MATLAB reference. Where the port reproduces one, it's for parity only.
 
-| # | MATLAB `run_complete_obstacle_course.m` actually checks | Rust `bin/obstacle_course.rs` actually checks |
-|---|---|---|
-| 1 | Rigid-body energy and linear-field patch test on an aligned trilinear octree, with a real solve | Hanging-node constraint rows reproduce a linear field. No solve. |
-| 2 | Flat punch on 2×2×2 grids: the active set converges and the gap is ≥ −0.01. No comparison with Hertz | 5 hard-coded gaps are classified by sign (2 active). |
-| 3 | DOF count grows by more than 1.5× after geometric refinement. No solve, no rate | The leaf count goes up after refining around a point. |
-| 4 | Bonded 2-body NIST assembly on 2×2×2 grids; `u` is finite. Passes automatically if the STEP file is missing | B-spline partition of unity. |
-| 5 | Matrix-free vs assembled matvec agreement and PCG convergence on 267 DOFs | CG on a 1000-unknown 1D tridiagonal matrix. |
+1. **"Ghost penalty" (`assemble_ghost_penalty_stabilization`)**: not a ghost penalty.
+   - Its shared-control-point block is a no-op: because of the `repmat` orientation, it only touches diagonal entries, which sum to zero.
+   - What remains are springs between control points paired by sorted index, with stiffness γh that isn't scaled by E.
+   - At E = 1, which most scripts use, it makes an immersed cantilever about **1000× too stiff**.
+   - It affects `solve_immersed_iga_3d`, `topopt_immersed_iga_3d` and the NIST demos.
+2. **`assemble_nitsche_dirichlet_3d`**: penalty only. It uses a trilinear trace at facet centroids and ignores `u_prescribed`.
+3. **Cut cells**: volume-fraction scaling of the full-cell stiffness, not exact integration.
+4. **3D WQ assembly**: the old `C_ijkl` Voigt map was wrong (33% error); fixed in `src/iga`.
+5. **3×3×3 element template**: exact only for p ≤ 2; replaced.
+6. **`solve_octree_gpu`**: ignores the penalty and Robin stiffness returned by `apply_boundary_conditions`, so weak Dirichlet (the default) and Robin BCs have no effect in that solver.
+7. **`assemble_neumann_bc_3d` and `assemble_robin_bc_3d`**: an empty facet selection means all facets. Obstacle 5's load lands on the entire surface this way.
+8. **Obstacle 2 ("Hertzian")**: a flat punch with only two contact points, so the system is singular in both unilateral and bonded mode; the punch's displacement is arbitrary. There is no comparison with Hertz theory.
+9. **AMR indicator**: a stress heuristic, not an error estimator. Compliance isn't monotone under refinement, because the cut-cell weights change as cells split.
+10. **Timing scripts in `src/fastformation/`**: several report extrapolated or modelled values; each header documents which.
 
-## Known MATLAB-side method limitations (port these deliberately, not blindly)
+## Next steps
 
-- **Cut cells:** volume-fraction scaling of the full-cell stiffness (`scale = Emin + (1-Emin)·w_e`), not exact cut-cell integration.
-- **`assemble_nitsche_dirichlet_3d`:** penalty term only, trilinear trace interpolation at facet centroids, `u_prescribed` ignored.
-- **`assemble_nitsche_contact_3d`:** also uses trilinear interpolation of control values.
-- **Timing scripts in `src/fastformation/`:** several report extrapolated or modelled values (documented in each header).
-
-## Suggested porting order (critical path)
-
-1. **Port `src/iga` one-to-one:** knots, B-spline values and derivatives, box space, connectivity (GeoPDEs numbering).
-2. **Gauss quadrature and the elasticity element stiffness** (Kronecker form, per element type). Validate against MATLAB's `K` by Frobenius-norm difference, plus the patch and manufactured-solution tests from `tests/testIgaKernel.m`.
-3. **Cut-cell quadrature points and weights** (sub-cell Gauss using the in/out test, with the BVH), plus **ghost penalty**.
-4. **Real `solve_cad`**: assembled or matrix-free K, then BCs, then PCG. Validate the cantilever tip deflection against MATLAB and against beam theory.
-5. **Nitsche Dirichlet and surface-integrated Neumann/Robin.**
-6. **Octree T₃D, then Tᵀ K T matrix-free**, and plug the CUDA kernel in on the real `Ke`.
-7. **Contact** (projectors, active-set Newton), then **AMR**, then **immersed topopt**.
-8. **Rewrite `obstacle_course.rs`** so each obstacle matches its MATLAB counterpart, then regenerate the README benchmark tables.
+1. Port the immersed topology optimization, with the consistent ghost penalty as default and legacy stabilization for parity.
+2. Port the WQ / FastFormation assembly and the 2D topology optimization.
+3. Build the verification suite (manufactured solutions on curved immersed domains, small-cut robustness, contact patch test, real Hertz problem, AMR rates). Then replace the MATLAB-side methods that fail it.

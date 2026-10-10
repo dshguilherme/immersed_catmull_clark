@@ -20,6 +20,7 @@ see [Rust port](#rust-port) and `docs/PORT_STATUS.md`.
 | FastFormation / weighted quadrature (2D and 3D) | **Verified** | Equals exact Gauss assembly for uniform density (machine precision) |
 | Structured topology optimization (2D/3D, SIMP + OC) | Working | Sensitivities checked against element energies |
 | CAD import (STEP/MSH/VTU/STL via Gmsh) | Working | |
+| Cut-cell stabilization (`assemble_ghost_penalty_stabilization`) | **Defective** | Not a ghost penalty: index-paired springs that aren't scaled by E. At E = 1 an immersed cantilever comes out about 1000× too stiff. A consistent ghost penalty exists in the Rust port; see `docs/PORT_STATUS.md` |
 | Immersed boundary treatment | **Simplified** | Cut cells use the full-cell stiffness scaled by the cell's volume fraction (fictitious-domain / density scaling). The geometry is not integrated exactly, so expect reduced accuracy near the boundary |
 | Dirichlet BC on immersed surfaces (`assemble_nitsche_dirichlet_3d`) | **Penalty only** | Penalty term only (no Nitsche consistency/symmetry terms); trace evaluated by trilinear interpolation at facet centroids; `u_prescribed` is ignored |
 | Multi-body contact, AMR, octree MPC, GPU PCG | Implemented, **not yet verified** against analytical benchmarks | See [Verification](#verification) |
@@ -148,18 +149,25 @@ extrapolated or modelled (unmeasured) values; each script documents this in its 
 
 ## Rust port
 
-`rust/` currently provides:
-- The octree with 2:1 balancing, hanging-node constraint maps, inside/outside classification, a generic PCG solver, and the SIMP/OC update with its density filter.
-- CAD labelling and topology utilities, and an egui BC-labelling GUI.
-- CUDA and WGPU matvec kernels.
+`rust/` is a port of the MATLAB reference. Each ported module has a test against data
+exported from MATLAB (`rust/tests/*_vs_matlab.rs`, fixtures written by `tests/export_rust_*.m`).
+What's in it:
 
-It does **not** yet contain a finite-element discretization. `solve_cad` and `topopt_3d` run on
-placeholder operators and synthetic strain energies, and the Rust `obstacle_course` does not
-reproduce the MATLAB checks. `docs/PORT_STATUS.md` tracks each module and the porting order.
+- **IGA kernel** (`iga/`): B-spline spaces, exact elasticity, loads.
+- **Immersed solver** (`immersed.rs`): it includes a *consistent* ghost penalty, which is now the default, and boundary conditions on labelled CAD faces (`immersed_bc.rs`).
+- **3D SIMP topology optimization** (`topopt_iga.rs`).
+- **Octree with hanging-node constraints and its BC engine** (`octree_fem.rs`).
+- **Multi-body penalty contact** (`contact.rs`) and **stress-driven AMR** (`amr.rs`).
+- **Binaries:** `solve_cad` and the GUI's Solve button now run the real immersed solver; `topopt_3d` runs the real optimizer; `obstacle_course` is a verification run with analytical checks.
+
+Still missing: the immersed topology optimization, WQ assembly, 2D topology optimization,
+Catmull-Clark subdivision, and STEP import without Python. See `docs/PORT_STATUS.md`,
+which also lists the problems found in the MATLAB reference during the port.
 
 ```powershell
 .\run_rust.ps1 build --release --manifest-path rust/Cargo.toml
-.\run_rust.ps1 test  --manifest-path rust/Cargo.toml
+.\run_rust.ps1 test  --manifest-path rust/Cargo.toml --release
+.\run_rust.ps1 run   --release --manifest-path rust/Cargo.toml --bin obstacle_course
 ```
 
 ---
