@@ -10,7 +10,9 @@ function mesh = importMeshViaPython(filename)
 [~, fname, ~] = fileparts(filename);
 temp_obj = fullfile(tempdir, sprintf('%s_%d_brep.obj', fname, randi(1000000)));
 
-python_exe = 'C:\Users\dshgu\miniconda3\python.exe';
+% Python with gmsh + numpy: IMMERSED_IGA_PYTHON if set, otherwise 'python' on the PATH
+python_exe = getenv('IMMERSED_IGA_PYTHON');
+if isempty(python_exe), python_exe = 'python'; end
 script_py = fullfile(fileparts(mfilename('fullpath')), 'brep_to_tri_mesh.py');
 
 cmd = sprintf('"%s" "%s" "%s" "%s"', python_exe, script_py, filename, temp_obj);

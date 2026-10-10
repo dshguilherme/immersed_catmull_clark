@@ -1,12 +1,11 @@
-﻿//! Immersed topology optimization inside a CAD body (port of the MATLAB
+//! Immersed topology optimization inside a CAD body (port of the MATLAB
 //! `topopt_immersed_iga_3d`, with the consistent ghost penalty by default).
 //!
-//! Usage: topopt_cad [model.obj] [--cells N] [--iters N] [--volfrac F] [--stab gp|legacy|none]
+//! Usage: topopt_cad [model.(obj|stl|step|msh|vtu)] [--cells N] [--iters N] [--volfrac F] [--stab gp|legacy|none]
 //! Without a model, a tilted box is used. The bottom face of the background grid is
 //! clamped and a central load is applied on the top face (as in the MATLAB reference).
 //! Writes `benchmarks/topopt_cad_result.json` (grid, densities, history).
 
-use immersed_iga::cad_model::{CadBody, MaterialProperties};
 use immersed_iga::cut_cell::TriangleMesh3D;
 use immersed_iga::immersed::{padded_bounds, Stabilization};
 use immersed_iga::topopt_immersed::{ImmersedTopOpt, ImmersedTopOptConfig};
@@ -43,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let mesh = match &model {
-        Some(path) => CadBody::parse_obj(&std::fs::read_to_string(path)?, MaterialProperties::default())?.mesh,
+        Some(path) => immersed_iga::brep_import::import_brep(std::path::Path::new(path))?,
         None => tilted_box(),
     };
     let gb = padded_bounds(&mesh, 0.05);

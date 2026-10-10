@@ -23,6 +23,7 @@ pub mod topopt_immersed;
 pub mod wq;
 pub mod topopt2d;
 pub mod catmull_clark;
+pub mod brep_import;
 
 pub use bspline::{evaluate_bspline_basis_1d, open_knot_vector};
 pub use octree::{BoundingBox3D, OctreeCell, OctreeMesh3D};
